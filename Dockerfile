@@ -1,6 +1,6 @@
 FROM python:3.12-slim@sha256:46cb7cc2877e60fbd5e21a9ae6115c30ace7a077b9f8772da879e4590c18c2e3
 
-WORKDIR /prod_next
+WORKDIR /prod
 
 COPY requirements.lock.txt ./
 
@@ -14,9 +14,9 @@ COPY strategies ./strategies
 COPY cli.py main.py ./
 
 RUN useradd --create-home --uid 1000 trader \
- && mkdir -p /prod_next/logs \
- && chown -R trader:trader /prod_next
+ && mkdir -p /prod/logs \
+ && chown -R trader:trader /prod
 
 USER trader
 
-CMD ["python", "-m", "cli", "run", "--config", "/prod_next/config.yaml"]
+CMD ["python", "-m", "cli", "run", "--config", "/prod/config.yaml"]

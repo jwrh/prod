@@ -11,7 +11,7 @@ from runtime.registry import load_runtime_config
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="prod-next")
+    parser = argparse.ArgumentParser(prog="prod")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     run_p = sub.add_parser("run")

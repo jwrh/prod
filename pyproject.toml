@@ -3,7 +3,7 @@ requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "prod_next"
+name = "prod"
 version = "3.0.0"
 description = "Lightweight production trading runtime"
 requires-python = ">=3.12"
@@ -20,7 +20,7 @@ dev = [
 ]
 
 [project.scripts]
-prod-next = "cli:main"
+prod = "cli:main"
 
 [tool.setuptools]
 py-modules = ["cli", "main"]

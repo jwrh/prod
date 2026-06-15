@@ -10,6 +10,6 @@ def test_runtime_package_lives_at_repo_root() -> None:
     assert (root / "observability").is_dir()
     assert (root / "strategies").is_dir()
     assert (root / "cli.py").is_file()
-    assert not (root / "prod_next" / "runtime").exists()
+    assert not any((path / "runtime").exists() for path in root.glob("prod_*"))
     assert (root / "runtime" / "context.py").is_file()
     assert not (root / "runtime" / "context_builder.py").exists()

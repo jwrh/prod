@@ -28,7 +28,7 @@ class PortfolioLine:
         return abs(self.delta) >= MIN_DELTA_SHARES
 
     def intents(self) -> tuple[OrderIntent, ...]:
-        client_order_id = f"prod-next-{uuid4().hex}"
+        client_order_id = f"prod-{uuid4().hex}"
         match self.delta > 0, self.rule.longs_fractional_ok:
             case True, True:
                 notional = round(self.delta * self.price, 2)

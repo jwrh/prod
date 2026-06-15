@@ -7,5 +7,5 @@ __pycache__/
 .env
 .env.*
 !.env.example
-prod_next.egg-info/
+*.egg-info/
 logs/

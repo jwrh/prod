@@ -5,6 +5,6 @@
 .superpowers/
 __pycache__/
 *.pyc
-prod_next.egg-info/
+*.egg-info/
 tests/
 docs/
