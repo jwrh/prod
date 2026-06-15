@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 
 
 def test_registry_loads_strict_config_and_rejects_unknown_keys(tmp_path, monkeypatch):
@@ -47,6 +48,74 @@ strategies:
     bad.write_text(config.read_text() + "\nextra: true\n")
     with pytest.raises(ValueError, match="unsupported keys"):
         load_runtime_config(bad)
+
+
+def test_root_risk_policy_is_strategy_default_until_overridden(tmp_path):
+    from runtime.registry import load_runtime_config
+
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        """
+data:
+  adapter: replay
+broker:
+  adapter: paper
+risk:
+  max_qty_per_order: 500
+  max_notional_per_order: 10000
+  max_gross_notional: 25000
+  max_drawdown_pct: 5.0
+  venue_rules:
+    AAA: {longs_fractional_ok: true, shortable: false}
+strategies:
+  - name: inherited
+    class: strategies.dummy.DummyStrategy
+    universe: [AAA]
+    schedule: {rebalance: 1m}
+    data:
+      windows:
+        - {name: fast, interval: 1m, lookback: 2}
+    capital: {mode: notional, amount: 10000}
+    params: {weights: {AAA: 1.0}}
+  - name: overridden
+    class: strategies.dummy.DummyStrategy
+    universe: [AAA]
+    schedule: {rebalance: 1m}
+    data:
+      windows:
+        - {name: fast, interval: 1m, lookback: 2}
+    capital: {mode: notional, amount: 10000}
+    risk:
+      max_notional_per_order: 20000
+      venue_rules:
+        AAA: {longs_fractional_ok: true, shortable: true}
+    params: {weights: {AAA: 1.0}}
+""",
+    )
+
+    inherited, overridden = load_runtime_config(config).strategies
+
+    assert inherited.risk.max_qty_per_order == 500
+    assert inherited.risk.max_notional_per_order == 10000
+    assert inherited.risk.max_gross_notional == 25000
+    assert inherited.risk.max_drawdown_pct == 5.0
+    assert inherited.risk.venue_rules["AAA"].shortable is False
+    assert overridden.risk.max_qty_per_order == 500
+    assert overridden.risk.max_notional_per_order == 20000
+    assert overridden.risk.max_gross_notional == 25000
+    assert overridden.risk.max_drawdown_pct == 5.0
+    assert overridden.risk.venue_rules["AAA"].shortable is True
+
+
+def test_ci_workflow_runs_design_acceptance_commands():
+    workflow = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
+
+    assert "uv run --python 3.12 pytest -q" in workflow
+    assert (
+        "uv run --python 3.12 python -m compileall -q "
+        "adapters domain observability runtime strategies tests cli.py main.py"
+    ) in workflow
+    assert "docker compose config --quiet" in workflow
 
 
 def test_jsonl_events_and_status_health_are_machine_readable(tmp_path):

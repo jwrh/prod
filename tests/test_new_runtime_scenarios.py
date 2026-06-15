@@ -143,6 +143,72 @@ def test_supervisor_coordinates_a_rebalance_tick_end_to_end():
     assert status.rows[-1]["ready"] is True
 
 
+def test_supervisor_order_ids_are_stable_within_schedule_bucket():
+    from domain.portfolio import AccountSnapshot, BrokerSnapshot, PortfolioTarget
+    from runtime.context import ContextBuilder
+    from runtime.execution_engine import ExecutionEngine
+    from runtime.portfolio_engine import PortfolioEngine
+    from runtime.risk_engine import RiskEngine
+    from runtime.scheduler import Tick
+    from runtime.supervisor import Supervisor
+
+    def submitted_id_at(now):
+        class Hub:
+            def snapshot(self, strategy_name, now):
+                return _data_view()
+
+        broker = Broker(BrokerSnapshot(account=AccountSnapshot(100_000.0, 100_000.0), positions={}))
+        supervisor = Supervisor(
+            strategies={"demo": Strategy(PortfolioTarget.weights({"AAA": 1.0}, "entry"))},
+            specs={"demo": _spec()},
+            broker=broker,
+            data_hub=Hub(),
+            context=ContextBuilder(),
+            risk_engine=RiskEngine(),
+            portfolio_engine=PortfolioEngine(),
+            execution_engine=ExecutionEngine(broker),
+            events=EventRecorder(),
+            status=StatusRecorder(),
+        )
+        tick = Tick("demo", now, date(2026, 6, 12), "rebalance")
+
+        asyncio.run(supervisor.on_tick(tick))
+
+        return broker.submitted[0].client_order_id
+
+    first = submitted_id_at(datetime(2026, 6, 12, 14, 30, 5, tzinfo=timezone.utc))
+    second = submitted_id_at(datetime(2026, 6, 12, 14, 30, 20, tzinfo=timezone.utc))
+
+    assert first == second
+
+
+def test_strategy_runner_terminates_timed_out_evaluation_process():
+    import time
+
+    from domain.portfolio import AccountSnapshot, BrokerSnapshot
+    from runtime.context import ContextBuilder, ContextReady
+    from runtime.strategy_runner import StrategyRunner, StrategyTimedOut
+
+    class SlowStrategy:
+        def evaluate(self, ctx):
+            time.sleep(5.0)
+            raise AssertionError("terminated evaluation should not return")
+
+    built = ContextBuilder().build(
+        _spec(),
+        _data_view(),
+        BrokerSnapshot(account=AccountSnapshot(100_000.0, 100_000.0), positions={}),
+        date(2026, 6, 12),
+        "rebalance",
+    )
+    assert isinstance(built, ContextReady)
+
+    result = asyncio.run(StrategyRunner(timeout_seconds=0.05, poll_seconds=0.01).evaluate(SlowStrategy(), built.context))
+
+    assert isinstance(result, StrategyTimedOut)
+    assert result.reason == "strategy_timeout"
+
+
 def test_recovery_cancels_open_orders_and_flattens_unexpected_exposure():
     from domain.orders import OrderState
     from domain.portfolio import AccountSnapshot, BrokerSnapshot, Position
@@ -179,6 +245,80 @@ def test_recovery_reports_clean_when_broker_state_needs_no_cleanup():
     assert result.clean is True
     assert result.ready is True
     assert result.incidents == ()
+
+
+def test_runtime_components_reconnect_rewarms_data_and_recovers_broker_state():
+    from runtime.composition import RuntimeComponents
+
+    class DataHub:
+        def __init__(self):
+            self.calls = []
+
+        def mark_disconnected(self):
+            self.calls.append(("mark_disconnected", None))
+
+        async def disconnect(self):
+            self.calls.append(("disconnect", None))
+
+        async def connect(self):
+            self.calls.append(("connect", None))
+
+        async def warmup(self, specs):
+            self.calls.append(("warmup", specs))
+
+    class Recovery:
+        def __init__(self):
+            self.calls = []
+
+        async def recover(self, specs):
+            self.calls.append(specs)
+
+    specs = (_spec(),)
+    data_hub = DataHub()
+    recovery = Recovery()
+    components = RuntimeComponents(data_hub=data_hub, recovery=recovery, specs=specs)
+
+    asyncio.run(components.reconnect())
+
+    assert data_hub.calls == [
+        ("mark_disconnected", None),
+        ("disconnect", None),
+        ("connect", None),
+        ("warmup", specs),
+    ]
+    assert recovery.calls == [specs]
+
+
+def test_runtime_app_reconnects_components_after_connection_failure():
+    from runtime.app import RuntimeApp
+    from runtime.scheduler import Tick
+
+    class Components:
+        def __init__(self):
+            self.reconnects = 0
+
+        async def start(self): ...
+        async def stop(self, reason): ...
+        async def reconnect(self):
+            self.reconnects += 1
+
+    class Scheduler:
+        def due_ticks(self, now):
+            return [Tick("demo", now, date(2026, 6, 12), "rebalance")]
+        def sleep_seconds(self):
+            return 60.0
+
+    class Supervisor:
+        async def on_tick(self, tick):
+            raise ConnectionError("feed disconnected")
+        async def shutdown(self, reason): ...
+
+    components = Components()
+    app = RuntimeApp(components=components, scheduler=Scheduler(), supervisor=Supervisor())
+
+    asyncio.run(app.run_once(datetime(2026, 6, 12, 14, 30, tzinfo=timezone.utc)))
+
+    assert components.reconnects == 1
 
 
 def test_runtime_app_is_lifecycle_only_and_delegates_ticks():

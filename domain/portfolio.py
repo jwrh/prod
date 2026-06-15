@@ -74,6 +74,16 @@ class RiskSpec:
             MappingProxyType({require_symbol(k): v for k, v in self.venue_rules.items()}),
         )
 
+    def merged_with(self, override: "RiskSpec") -> "RiskSpec":
+        """Return this policy with explicitly configured strategy overrides."""
+        return RiskSpec(
+            max_qty_per_order=override.max_qty_per_order or self.max_qty_per_order,
+            max_notional_per_order=override.max_notional_per_order or self.max_notional_per_order,
+            max_gross_notional=override.max_gross_notional or self.max_gross_notional,
+            max_drawdown_pct=override.max_drawdown_pct or self.max_drawdown_pct,
+            venue_rules={**self.venue_rules, **override.venue_rules},
+        )
+
 
 class PortfolioTarget:
     """Strategy output: hold, target portfolio weights, or flat."""

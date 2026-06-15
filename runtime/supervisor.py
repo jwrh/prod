@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import asyncio
 from typing import Mapping
 
+from domain.market import INTERVAL_SECONDS
 from domain.ports import BrokerPort, EventSink, StatusPort
 from domain.portfolio import PortfolioTarget
 from domain.strategy import Strategy, StrategySpec
@@ -15,6 +15,7 @@ from runtime.execution_engine import ExecutionEngine
 from runtime.portfolio_engine import PortfolioEngine
 from runtime.risk_engine import RiskAllowed, RiskBlocked, RiskEngine, RiskFlatten
 from runtime.scheduler import Tick
+from runtime.strategy_runner import StrategyFailed, StrategyRunner, StrategySucceeded, StrategyTimedOut
 
 
 class Supervisor:
@@ -34,6 +35,7 @@ class Supervisor:
         events: EventSink,
         status: StatusPort,
         strategy_timeout_seconds: float = 5.0,
+        strategy_runner: StrategyRunner | None = None,
     ) -> None:
         self._strategies = dict(strategies)
         self._specs = dict(specs)
@@ -45,7 +47,7 @@ class Supervisor:
         self._execution = execution_engine
         self._events = events
         self._status = status
-        self._timeout = strategy_timeout_seconds
+        self._strategy_runner = strategy_runner or StrategyRunner(timeout_seconds=strategy_timeout_seconds)
         self.ready = True
 
     async def on_tick(self, tick: Tick) -> None:
@@ -59,16 +61,19 @@ class Supervisor:
                 return
             case ContextReady(context=context):
                 pass
-        try:
-            target = await asyncio.wait_for(
-                asyncio.to_thread(self._strategies[spec.name].evaluate, context),
-                timeout=self._timeout,
-            )
-        except Exception as exc:
-            self.ready = False
-            self._events.record("decision", {"strategy": spec.name, "status": "failed", "error": str(exc)})
-            self._write_status(False, tick, "strategy_failed")
-            return
+        match await self._strategy_runner.evaluate(self._strategies[spec.name], context):
+            case StrategySucceeded(target=target):
+                pass
+            case StrategyTimedOut(reason=reason):
+                self.ready = False
+                self._events.record("decision", {"strategy": spec.name, "status": "failed", "error": reason})
+                self._write_status(False, tick, reason)
+                return
+            case StrategyFailed(error=error):
+                self.ready = False
+                self._events.record("decision", {"strategy": spec.name, "status": "failed", "error": error})
+                self._write_status(False, tick, "strategy_failed")
+                return
         self._events.record("decision", {"strategy": spec.name, "action": target.action, "reason": target.reason})
         match self._risk.check(spec, target, broker, data):
             case RiskFlatten(reason=reason):
@@ -88,7 +93,7 @@ class Supervisor:
 
     async def _execute_target(self, spec: StrategySpec, target: PortfolioTarget, broker, prices, tick: Tick) -> None:
         try:
-            intents = self._portfolio.diff(spec, target, broker, prices=prices)
+            intents = self._portfolio.diff(spec, target, broker, prices=prices, batch_key=self._batch_key(spec, tick))
             fills = await self._execution.execute(spec, intents)
         except BrokerAmbiguous as exc:
             self.ready = False
@@ -115,3 +120,12 @@ class Supervisor:
             payload["last_block"] = reason
         self._status.write(payload)
         self._events.record("status", payload)
+
+    def _batch_key(self, spec: StrategySpec, tick: Tick) -> str:
+        return f"{tick.session.isoformat()}:{tick.strategy_name}:{tick.trigger}:{self._schedule_bucket(spec, tick)}"
+
+    def _schedule_bucket(self, spec: StrategySpec, tick: Tick) -> int:
+        seconds = INTERVAL_SECONDS[spec.schedule.rebalance]
+        if seconds >= 86_400:
+            return tick.session.toordinal()
+        return int(tick.now.timestamp()) // seconds

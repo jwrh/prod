@@ -9,6 +9,7 @@ from typing import Protocol
 
 class _Components(Protocol):
     async def start(self) -> None: ...
+    async def reconnect(self) -> None: ...
     async def stop(self, reason: str) -> None: ...
 
 
@@ -28,8 +29,11 @@ class RuntimeApp:
 
     async def run_once(self, now=None) -> None:
         current = now or self._clock()
-        for tick in self._scheduler.due_ticks(current):
-            await self._supervisor.on_tick(tick)
+        try:
+            for tick in self._scheduler.due_ticks(current):
+                await self._supervisor.on_tick(tick)
+        except ConnectionError:
+            await self._components.reconnect()
 
     async def run_forever(self) -> None:
         while not self._stopping:
