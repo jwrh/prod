@@ -8,6 +8,7 @@ from typing import Protocol
 from domain.portfolio import BrokerSnapshot, PortfolioTarget, VenueRule
 from domain.strategy import StrategySpec
 from runtime.data_hub import DataView
+from runtime.portfolio_engine import PortfolioLine, PortfolioPlan
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +44,11 @@ class RiskAssessment:
     target: PortfolioTarget
     broker: BrokerSnapshot
     data: DataView
+    high_water_equity: float | None = None
+
+    def __post_init__(self) -> None:
+        if self.high_water_equity is None:
+            object.__setattr__(self, "high_water_equity", self.broker.account.equity)
 
     @property
     def universe(self) -> frozenset[str]:
@@ -82,8 +88,31 @@ class RiskAssessment:
 
     @property
     def projected_gross_notional(self) -> float:
-        gross_weight = min(1.0, sum(abs(weight) for weight in self.target.weights.values()))
-        return self.spec.capital.amount * gross_weight
+        return sum(abs(notional) for notional in self.portfolio_plan.notionals.values())
+
+    @property
+    def max_order_notional(self) -> float:
+        return self.spec.risk.max_notional_per_order or float("inf")
+
+    @property
+    def max_order_qty(self) -> float:
+        return self.spec.risk.max_qty_per_order or float("inf")
+
+    @property
+    def max_drawdown_pct(self) -> float:
+        return self.spec.risk.max_drawdown_pct or float("inf")
+
+    @property
+    def drawdown_pct(self) -> float:
+        return max(0.0, (self.high_water_equity - self.broker.account.equity) / self.high_water_equity * 100.0)
+
+    @property
+    def portfolio_plan(self) -> PortfolioPlan:
+        return PortfolioPlan.from_target(self.spec, self.target, self.broker, prices=self.data.prices)
+
+    @property
+    def planned_order_lines(self) -> tuple[PortfolioLine, ...]:
+        return tuple(line for line in self.portfolio_plan.lines() if line.intents("risk-check"))
 
     def venue_rule(self, symbol: str) -> VenueRule:
         return self.spec.risk.venue_rules.get(symbol, VenueRule())
@@ -137,6 +166,36 @@ class GrossNotionalRule:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class MaxOrderNotionalRule:
+    def evaluate(self, assessment: RiskAssessment) -> RiskDecision:
+        return (
+            RiskBlocked("max_notional_per_order")
+            if any(line.planned_notional > assessment.max_order_notional for line in assessment.planned_order_lines)
+            else RiskAllowed()
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class MaxOrderQtyRule:
+    def evaluate(self, assessment: RiskAssessment) -> RiskDecision:
+        return (
+            RiskBlocked("max_qty_per_order")
+            if any(line.planned_qty > assessment.max_order_qty for line in assessment.planned_order_lines)
+            else RiskAllowed()
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class DrawdownRule:
+    def evaluate(self, assessment: RiskAssessment) -> RiskDecision:
+        return (
+            RiskFlatten("max_drawdown_pct")
+            if assessment.drawdown_pct > assessment.max_drawdown_pct
+            else RiskAllowed()
+        )
+
+
 class RiskEngine:
     """Evaluates ordered risk policy objects for one strategy decision."""
 
@@ -146,11 +205,15 @@ class RiskEngine:
         TargetUniverseRule(),
         ShortSaleRule(),
         MissingTargetPriceRule(),
+        DrawdownRule(),
         GrossNotionalRule(),
+        MaxOrderNotionalRule(),
+        MaxOrderQtyRule(),
     )
 
     def __init__(self, rules: tuple[RiskRule, ...] = DEFAULT_RULES) -> None:
         self._rules = rules
+        self._high_water_equity: dict[str, float] = {}
 
     @property
     def rules(self) -> tuple[RiskRule, ...]:
@@ -163,5 +226,10 @@ class RiskEngine:
         broker: BrokerSnapshot,
         data: DataView,
     ) -> RiskDecision:
-        assessment = RiskAssessment(spec, target, broker, data)
+        assessment = RiskAssessment(spec, target, broker, data, self._high_water(spec.name, broker.account.equity))
         return next(filter(None, (rule.evaluate(assessment) for rule in self._rules)), RiskAllowed())
+
+    def _high_water(self, strategy_name: str, equity: float) -> float:
+        high_water = max(self._high_water_equity.get(strategy_name, equity), equity)
+        self._high_water_equity[strategy_name] = high_water
+        return high_water

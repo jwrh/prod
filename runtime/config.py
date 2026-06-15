@@ -47,15 +47,16 @@ class RuntimeConfigLoader:
 
     def from_mapping(self, raw: Mapping[str, Any]) -> RuntimeConfig:
         self._reject(raw, self.ROOT_KEYS, "root")
+        root_risk = self._risk(raw.get("risk", {}) or {})
         return RuntimeConfig(
             data=self._adapter(self._required(raw, "data")),
             broker=self._adapter(self._required(raw, "broker")),
             observability=self._observability(raw.get("observability", {}) or {}),
-            risk=self._risk(raw.get("risk", {}) or {}),
-            strategies=tuple(self._strategy(row) for row in self._required(raw, "strategies")),
+            risk=root_risk,
+            strategies=tuple(self._strategy(row, root_risk) for row in self._required(raw, "strategies")),
         )
 
-    def _strategy(self, raw: Mapping[str, Any]) -> StrategySpec:
+    def _strategy(self, raw: Mapping[str, Any], root_risk: RiskSpec) -> StrategySpec:
         self._reject(raw, self.STRATEGY_KEYS, "strategies[]")
         data = self._required(raw, "data")
         schedule = self._required(raw, "schedule")
@@ -71,7 +72,7 @@ class RuntimeConfigLoader:
             schedule=ScheduleSpec(str(self._required(schedule, "rebalance"))),
             data=StrategyDataSpec(windows),
             capital=CapitalSpec(amount=float(self._required(capital, "amount"))),
-            risk=self._risk(raw.get("risk", {}) or {}),
+            risk=root_risk.merged_with(self._risk(raw.get("risk", {}) or {})),
             params=dict(raw.get("params", {}) or {}),
             allow_adoption=bool(raw.get("allow_adoption", False)),
         )

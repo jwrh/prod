@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
+from hashlib import sha256
 from typing import Mapping
-from uuid import uuid4
 
 from domain.orders import OrderIntent
 from domain.portfolio import BrokerSnapshot, PortfolioTarget, Position, VenueRule
@@ -18,33 +18,85 @@ MIN_DELTA_SHARES = 0.01
 class PortfolioLine:
     """One symbol's planned portfolio change."""
 
+    strategy_name: str
     symbol: str
-    delta: float
+    current_qty: float
+    target_qty: float
     price: float
     rule: VenueRule
+
+    @property
+    def delta(self) -> float:
+        return self.target_qty - self.current_qty
 
     @property
     def material(self) -> bool:
         return abs(self.delta) >= MIN_DELTA_SHARES
 
-    def intents(self) -> tuple[OrderIntent, ...]:
-        client_order_id = f"prod-{uuid4().hex}"
+    @property
+    def side(self) -> str:
+        return "buy" if self.delta > 0 else "sell"
+
+    @property
+    def planned_qty(self) -> float:
         match self.delta > 0, self.rule.longs_fractional_ok:
             case True, True:
-                notional = round(self.delta * self.price, 2)
+                return self.planned_notional / self.price
+            case True, False:
+                return self._whole_lot_qty(self.delta)
+            case False, _ if self._reduces_fractional_long:
+                return round(abs(self.delta), 6)
+            case False, _:
+                return self._whole_lot_qty(abs(self.delta))
+
+    @property
+    def planned_notional(self) -> float:
+        match self.delta > 0, self.rule.longs_fractional_ok:
+            case True, True:
+                return round(self.delta * self.price, 2)
+            case _:
+                return round(self.planned_qty * self.price, 2)
+
+    @property
+    def _reduces_fractional_long(self) -> bool:
+        return self.rule.longs_fractional_ok and self.current_qty > 0 and self.target_qty >= 0
+
+    def intents(self, batch_key: str = "manual") -> tuple[OrderIntent, ...]:
+        if not self.material:
+            return ()
+        client_order_id = self._client_order_id(batch_key)
+        match self.delta > 0, self.rule.longs_fractional_ok:
+            case True, True:
+                notional = self.planned_notional
                 return (
                     OrderIntent(self.symbol, "buy", notional=notional, client_order_id=client_order_id),
                 ) if notional >= 1 else ()
             case True, False:
-                qty = math.floor(self.delta / self.rule.lot_size) * self.rule.lot_size
+                qty = self.planned_qty
                 return (
                     OrderIntent(self.symbol, "buy", qty=qty, client_order_id=client_order_id),
                 ) if qty >= self.rule.min_qty else ()
             case False, _:
-                qty = math.floor(abs(self.delta) / self.rule.lot_size) * self.rule.lot_size
+                qty = self.planned_qty
                 return (
                     OrderIntent(self.symbol, "sell", qty=qty, client_order_id=client_order_id),
                 ) if qty >= self.rule.min_qty else ()
+
+    def _whole_lot_qty(self, qty: float) -> float:
+        return math.floor(qty / self.rule.lot_size) * self.rule.lot_size
+
+    def _client_order_id(self, batch_key: str) -> str:
+        raw = "|".join(
+            (
+                self.strategy_name,
+                batch_key,
+                self.symbol,
+                self.side,
+                f"{self.planned_qty:.8f}",
+                f"{self.planned_notional:.2f}",
+            )
+        )
+        return f"prod-{sha256(raw.encode('utf-8')).hexdigest()[:32]}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,10 +158,25 @@ class PortfolioPlan:
         return self.target_qty(symbol) - self.current_qty(symbol)
 
     def line(self, symbol: str) -> PortfolioLine:
-        return PortfolioLine(symbol, self.delta(symbol), self.price(symbol), self.venue_rule(symbol))
+        return PortfolioLine(
+            self.spec.name,
+            symbol,
+            self.current_qty(symbol),
+            self.target_qty(symbol),
+            self.price(symbol),
+            self.venue_rule(symbol),
+        )
 
     def lines(self) -> tuple[PortfolioLine, ...]:
         return tuple(self.line(symbol) for symbol in self.symbols)
+
+    def intents(self, batch_key: str = "manual") -> tuple[OrderIntent, ...]:
+        intents = (
+            intent
+            for line in self.lines()
+            for intent in line.intents(batch_key)
+        )
+        return tuple(sorted(intents, key=lambda order: 0 if order.side == "sell" else 1))
 
     def price(self, symbol: str) -> float:
         match self.prices.get(symbol):
@@ -134,12 +201,7 @@ class PortfolioEngine:
         broker: BrokerSnapshot,
         *,
         prices: dict[str, float],
+        batch_key: str = "manual",
     ) -> list[OrderIntent]:
         plan = PortfolioPlan.from_target(spec, target, broker, prices=prices)
-        intents = (
-            intent
-            for line in plan.lines()
-            if line.material
-            for intent in line.intents()
-        )
-        return sorted(intents, key=lambda order: 0 if order.side == "sell" else 1)
+        return list(plan.intents(batch_key))

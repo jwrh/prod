@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 
 import numpy as np
 
-from domain.market import BidAsk, DataRequest, Quote, coerce_warmup_rows
+from domain.market import BidAsk, DataRequest, INTERVAL_SECONDS, Quote, coerce_warmup_rows
 from domain.ports import MarketDataPort
 from domain.strategy import StrategySpec
 
@@ -28,6 +28,7 @@ class DataView:
 class _WindowState:
     request: DataRequest
     values: np.ndarray
+    bucket: int | None = None
 
 
 class DataHub:
@@ -45,6 +46,7 @@ class DataHub:
         await self._feed.connect()
 
     async def disconnect(self) -> None:
+        self._disconnected = True
         await self._feed.disconnect()
 
     async def warmup(self, specs: tuple[StrategySpec, ...]) -> None:
@@ -67,7 +69,7 @@ class DataHub:
         for (strategy, _name), state in list(self._windows.items()):
             if quote.symbol not in state.request.symbols:
                 continue
-            self._update_window(strategy, state, quote)
+            self._update_window(state, quote)
 
     def mark_disconnected(self) -> None:
         self._disconnected = True
@@ -103,12 +105,26 @@ class DataHub:
             for window in spec.data.windows
         }
 
-    def _update_window(self, strategy: str, state: _WindowState, _quote: Quote) -> None:
+    def _update_window(self, state: _WindowState, quote: Quote) -> None:
         latest = []
         for symbol in state.request.symbols:
             match self._quotes.get(symbol):
                 case None:
                     return
-                case quote:
-                    latest.append(quote.price)
-        state.values = np.vstack([state.values[1:], np.array(latest, dtype=float)])
+                case stored_quote:
+                    latest.append(stored_quote.price)
+        latest_prices = np.array(latest, dtype=float)
+        bucket = self._bucket(quote.now, state.request.interval)
+        if state.bucket is None:
+            state.values[-1] = latest_prices
+        elif bucket == state.bucket:
+            state.values[-1] = latest_prices
+        else:
+            state.values = np.vstack([state.values[1:], latest_prices])
+        state.bucket = bucket
+
+    def _bucket(self, now: datetime, interval: str) -> int:
+        seconds = INTERVAL_SECONDS[interval]
+        if seconds >= 86_400:
+            return now.date().toordinal()
+        return int(now.timestamp()) // seconds

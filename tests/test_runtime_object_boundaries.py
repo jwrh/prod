@@ -186,8 +186,11 @@ def test_risk_engine_returns_explicit_decision_variants():
 
 def test_risk_engine_owns_an_ordered_rule_pipeline():
     from runtime.risk_engine import (
+        DrawdownRule,
         FreshTargetDataRule,
         GrossNotionalRule,
+        MaxOrderNotionalRule,
+        MaxOrderQtyRule,
         MissingTargetPriceRule,
         RiskEngine,
         ShortSaleRule,
@@ -203,7 +206,10 @@ def test_risk_engine_owns_an_ordered_rule_pipeline():
         TargetUniverseRule(),
         ShortSaleRule(),
         MissingTargetPriceRule(),
+        DrawdownRule(),
         GrossNotionalRule(),
+        MaxOrderNotionalRule(),
+        MaxOrderQtyRule(),
     )
 
 

@@ -33,6 +33,13 @@ class RuntimeComponents:
         await self.data_hub.warmup(self.specs)
         await self.recovery.recover(self.specs)
 
+    async def reconnect(self) -> None:
+        self.data_hub.mark_disconnected()
+        await self.data_hub.disconnect()
+        await self.data_hub.connect()
+        await self.data_hub.warmup(self.specs)
+        await self.recovery.recover(self.specs)
+
     async def stop(self, reason: str) -> None:
         await self.data_hub.disconnect()
 
