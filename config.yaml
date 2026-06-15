@@ -1,0 +1,39 @@
+data:
+  adapter: replay
+  warmup_rows:
+    demo-long-only:demo:1m:3:
+      AAA: [100.0, 101.0, 102.0]
+      BBB: [50.0, 50.5, 51.0]
+  quotes:
+    - {symbol: AAA, price: 103.0}
+    - {symbol: BBB, price: 52.0}
+
+broker:
+  adapter: paper
+
+observability:
+  log_dir: logs/events
+  status_path: logs/status.json
+
+risk:
+  max_gross_notional: 100000
+  max_drawdown_pct: 5.0
+
+strategies:
+  - name: demo-long-only
+    class: strategies.dummy.DummyStrategy
+    universe: [AAA, BBB]
+    schedule: {rebalance: 1m}
+    data:
+      windows:
+        - {name: demo, interval: 1m, lookback: 3}
+    capital: {mode: notional, amount: 10000}
+    risk:
+      max_qty_per_order: 1000
+      max_notional_per_order: 10000
+      max_gross_notional: 10000
+      venue_rules:
+        AAA: {longs_fractional_ok: true, shortable: false}
+        BBB: {longs_fractional_ok: true, shortable: false}
+    params:
+      weights: {AAA: 0.6, BBB: 0.4}

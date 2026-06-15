@@ -1,0 +1,19 @@
+services:
+  trader:
+    build: .
+    environment:
+      STATUS_PATH: /prod_next/logs/status.json
+      REQUIRED_STRATEGIES: demo-long-only
+    volumes:
+      - ./config.yaml:/prod_next/config.yaml:ro
+      - ./logs:/prod_next/logs
+    restart: unless-stopped
+    stop_grace_period: 120s
+    mem_limit: 1g
+    cpus: 1.0
+    healthcheck:
+      test: ["CMD", "python", "-m", "cli", "status", "--status", "/prod_next/logs/status.json", "--required-strategy", "demo-long-only"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
