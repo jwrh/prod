@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "prod_next"
 version = "3.0.0"
-description = "Typed production trading runtime"
+description = "Lightweight production trading runtime"
 requires-python = ">=3.12"
 dependencies = [
     "alpaca-py>=0.43.0",
