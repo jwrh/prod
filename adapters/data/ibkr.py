@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from domain.market import DataRequest, Quote
 
 _BAR_SIZE = {"1m": "1 min", "5m": "5 mins", "15m": "15 mins", "1h": "1 hour", "1d": "1 day"}
@@ -28,7 +30,8 @@ class IBKRMarketData:
     async def warmup(self, requests: tuple[DataRequest, ...]):
         if self._ib is None:
             raise RuntimeError("IBKRMarketData is not connected")
-        return {request.key: await self._bars_for(request) for request in requests}
+        rows = await asyncio.gather(*(self._bars_for(request) for request in requests))
+        return {request.key: value for request, value in zip(requests, rows)}
 
     async def subscribe(self, symbols: tuple[str, ...], sink) -> None:
         self._sink = sink
@@ -50,21 +53,20 @@ class IBKRMarketData:
             ticker.updateEvent += handler
 
     async def _bars_for(self, request: DataRequest):
+        rows = await asyncio.gather(*(self._bars_for_symbol(request, symbol) for symbol in request.symbols))
+        return dict(rows)
+
+    async def _bars_for_symbol(self, request: DataRequest, symbol: str):
         from ib_async import Stock
 
-        contract = Stock(request.symbols[0], "SMART", "USD")
+        contract = Stock(symbol, "SMART", "USD")
         await self._ib.qualifyContractsAsync(contract)
-        rows = {}
-        for symbol in request.symbols:
-            contract = Stock(symbol, "SMART", "USD")
-            await self._ib.qualifyContractsAsync(contract)
-            bars = await self._ib.reqHistoricalDataAsync(
-                contract,
-                endDateTime="",
-                durationStr=f"{max(request.lookback, 2)} D" if request.interval == "1d" else f"{request.lookback * 60} S",
-                barSizeSetting=_BAR_SIZE[request.interval],
-                whatToShow="MIDPOINT",
-                useRTH=True,
-            )
-            rows[symbol] = [float(bar.close) for bar in bars[-request.lookback :]]
-        return rows
+        bars = await self._ib.reqHistoricalDataAsync(
+            contract,
+            endDateTime="",
+            durationStr=f"{max(request.lookback, 2)} D" if request.interval == "1d" else f"{request.lookback * 60} S",
+            barSizeSetting=_BAR_SIZE[request.interval],
+            whatToShow="MIDPOINT",
+            useRTH=True,
+        )
+        return symbol, [float(bar.close) for bar in bars[-request.lookback :]]

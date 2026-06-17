@@ -35,6 +35,11 @@ class StrategyDataSpec:
     def __post_init__(self) -> None:
         if not self.windows:
             raise ValueError("at least one data window is required")
+        seen: set[str] = set()
+        for window in self.windows:
+            if window.name in seen:
+                raise ValueError(f"duplicate data window name: {window.name}")
+            seen.add(window.name)
 
 
 @dataclass(frozen=True)
@@ -78,7 +83,13 @@ class StrategySpec:
             raise ValueError("strategy class is required")
         if not self.universe:
             raise ValueError("strategy universe is required")
-        object.__setattr__(self, "universe", tuple(require_symbol(s) for s in self.universe))
+        universe = tuple(require_symbol(s) for s in self.universe)
+        seen: set[str] = set()
+        for symbol in universe:
+            if symbol in seen:
+                raise ValueError(f"duplicate universe symbol: {symbol}")
+            seen.add(symbol)
+        object.__setattr__(self, "universe", universe)
         object.__setattr__(self, "params", MappingProxyType(dict(self.params)))
 
 

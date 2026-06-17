@@ -41,7 +41,7 @@ class PortfolioLine:
     def planned_qty(self) -> float:
         match self.delta > 0, self.rule.longs_fractional_ok:
             case True, True:
-                return self.planned_notional / self.price
+                return round(self.delta, 6)
             case True, False:
                 return self._whole_lot_qty(self.delta)
             case False, _ if self._reduces_fractional_long:
@@ -51,11 +51,7 @@ class PortfolioLine:
 
     @property
     def planned_notional(self) -> float:
-        match self.delta > 0, self.rule.longs_fractional_ok:
-            case True, True:
-                return round(self.delta * self.price, 2)
-            case _:
-                return round(self.planned_qty * self.price, 2)
+        return round(self.planned_qty * self.price, 2)
 
     @property
     def _reduces_fractional_long(self) -> bool:
@@ -67,10 +63,10 @@ class PortfolioLine:
         client_order_id = self._client_order_id(batch_key)
         match self.delta > 0, self.rule.longs_fractional_ok:
             case True, True:
-                notional = self.planned_notional
+                qty = self.planned_qty
                 return (
-                    OrderIntent(self.symbol, "buy", notional=notional, client_order_id=client_order_id),
-                ) if notional >= 1 else ()
+                    OrderIntent(self.symbol, "buy", qty=qty, client_order_id=client_order_id),
+                ) if qty > 0 and self.planned_notional >= 1 else ()
             case True, False:
                 qty = self.planned_qty
                 return (

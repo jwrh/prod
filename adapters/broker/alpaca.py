@@ -56,19 +56,21 @@ class AlpacaBroker:
         return [_order(order) for order in raw]
 
     async def cancel_open_orders(self, symbols: tuple[str, ...]) -> None:
-        for order in await self.list_open_orders(symbols):
-            await asyncio.to_thread(self._client.cancel_order_by_id, order.id)
+        open_orders = await self.list_open_orders(symbols)
+        await asyncio.gather(
+            *(asyncio.to_thread(self._client.cancel_order_by_id, order.id) for order in open_orders)
+        )
 
     async def close_positions(self, symbols: tuple[str, ...]):
-        orders = []
-        for symbol in symbols:
-            try:
-                raw = await asyncio.to_thread(self._client.close_position, symbol_or_asset_id=symbol)
-            except Exception:
-                continue
-            if raw is not None:
-                orders.append(_order(raw))
-        return orders
+        closed = await asyncio.gather(*(self._close_position(symbol) for symbol in symbols))
+        return [order for order in closed if order is not None]
+
+    async def _close_position(self, symbol: str) -> OrderState | None:
+        try:
+            raw = await asyncio.to_thread(self._client.close_position, symbol_or_asset_id=symbol)
+        except Exception:
+            return None
+        return None if raw is None else _order(raw)
 
 
 def _order(raw) -> OrderState:

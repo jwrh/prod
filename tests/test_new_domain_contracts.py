@@ -32,9 +32,10 @@ def test_strategy_contract_accepts_hold_target_and_flat():
 
 
 def test_contracts_reject_invalid_market_and_target_values():
-    from domain.market import BidAsk
+    from domain.market import BidAsk, Quote
     from domain.orders import OrderIntent
-    from domain.portfolio import AccountSnapshot, PortfolioTarget
+    from domain.portfolio import AccountSnapshot, BrokerSnapshot, PortfolioTarget, Position
+    from domain.strategy import CapitalSpec, DataWindowSpec, ScheduleSpec, StrategyDataSpec, StrategySpec
 
     with pytest.raises(ValueError, match="bid < ask"):
         BidAsk(10.0, 10.0)
@@ -42,8 +43,33 @@ def test_contracts_reject_invalid_market_and_target_values():
         AccountSnapshot(equity=0.0, cash=1.0)
     with pytest.raises(ValueError, match="reason"):
         PortfolioTarget.hold("")
+    with pytest.raises(ValueError, match="duplicate target symbol: AAA"):
+        PortfolioTarget.weights({"AAA": 0.6, "aaa": 0.4}, "bad")
     with pytest.raises(ValueError, match="exactly one"):
         OrderIntent(symbol="AAA", side="buy", qty=1.0, notional=10.0)
+    with pytest.raises(ValueError, match="quote timestamp must include timezone"):
+        Quote("AAA", 25.0, now=datetime(2026, 6, 14, 16, 0))
+    with pytest.raises(ValueError, match="position key AAA does not match position symbol BBB"):
+        BrokerSnapshot(
+            AccountSnapshot(equity=100_000.0, cash=100_000.0),
+            positions={"AAA": Position("BBB", qty=10.0)},
+        )
+    with pytest.raises(ValueError, match="duplicate data window name: fast"):
+        StrategyDataSpec(
+            (
+                DataWindowSpec("fast", "1m", 2),
+                DataWindowSpec("fast", "5m", 2),
+            )
+        )
+    with pytest.raises(ValueError, match="duplicate universe symbol: AAA"):
+        StrategySpec(
+            name="demo",
+            class_path="strategies.dummy.DummyStrategy",
+            universe=("AAA", "aaa"),
+            schedule=ScheduleSpec("1m"),
+            data=StrategyDataSpec((DataWindowSpec("fast", "1m", 2),)),
+            capital=CapitalSpec(10_000.0),
+        )
 
 
 def test_runtime_import_boundaries_are_clean():

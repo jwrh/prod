@@ -29,11 +29,18 @@ class RuntimeApp:
 
     async def run_once(self, now=None) -> None:
         current = now or self._clock()
-        try:
-            for tick in self._scheduler.due_ticks(current):
-                await self._supervisor.on_tick(tick)
-        except ConnectionError:
+        ticks = self._scheduler.due_ticks(current)
+        if not ticks:
+            return
+        results = await asyncio.gather(
+            *(self._supervisor.on_tick(tick) for tick in ticks),
+            return_exceptions=True,
+        )
+        if any(isinstance(result, ConnectionError) for result in results):
             await self._components.reconnect()
+        for result in results:
+            if isinstance(result, BaseException) and not isinstance(result, ConnectionError):
+                raise result
 
     async def run_forever(self) -> None:
         while not self._stopping:
