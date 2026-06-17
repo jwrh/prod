@@ -35,7 +35,14 @@ class BrokerSnapshot:
     positions: Mapping[str, Position] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        normalized = {require_symbol(k): v for k, v in self.positions.items()}
+        normalized = {}
+        for key, position in self.positions.items():
+            symbol = require_symbol(key)
+            if not isinstance(position, Position):
+                raise ValueError(f"position {symbol} must be a Position")
+            if position.symbol != symbol:
+                raise ValueError(f"position key {symbol} does not match position symbol {position.symbol}")
+            normalized[symbol] = position
         object.__setattr__(self, "positions", MappingProxyType(normalized))
 
 
@@ -98,7 +105,12 @@ class PortfolioTarget:
             raise ValueError(f"unsupported target action: {action}")
         if not isinstance(reason, str) or not reason.strip():
             raise ValueError("reason must be a non-empty string")
-        normalized = {require_symbol(k): require_finite(v, f"weight {k}") for k, v in weights.items()}
+        normalized = {}
+        for key, value in weights.items():
+            symbol = require_symbol(key)
+            if symbol in normalized:
+                raise ValueError(f"duplicate target symbol: {symbol}")
+            normalized[symbol] = require_finite(value, f"weight {key}")
         if action in {"hold", "flat"} and normalized:
             raise ValueError(f"{action} cannot carry weights")
         self.action = action

@@ -45,7 +45,7 @@ class AdapterFactory:
                 return AlpacaBroker(
                     api_key=self._env("ALPACA_API_KEY"),
                     api_secret=self._env("ALPACA_API_SECRET"),
-                    paper=bool(config.settings.get("paper", True)),
+                    paper=self._bool(config.settings.get("paper", True), "broker.paper"),
                 )
             case "paper":
                 return ReplayBroker(BrokerSnapshot(AccountSnapshot(100_000.0, 100_000.0), positions={}))
@@ -63,4 +63,9 @@ class AdapterFactory:
         value = self._environ.get(name, "").strip()
         if not value:
             raise ValueError(f"missing required environment variable: {name}")
+        return value
+
+    def _bool(self, value, name: str) -> bool:
+        if not isinstance(value, bool):
+            raise ValueError(f"{name} must be boolean")
         return value

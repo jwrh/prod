@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Mapping
 
 from domain.market import INTERVAL_SECONDS
@@ -57,7 +58,7 @@ class Supervisor:
         data = self._data.snapshot(spec.name, tick.now)
         match self._contexts.build(spec, data, broker, tick.session, tick.trigger):
             case ContextBlocked(reason=reason):
-                await self._handle_block(spec, reason)
+                await self._handle_block(spec, tick, reason)
                 return
             case ContextReady(context=context):
                 pass
@@ -87,8 +88,7 @@ class Supervisor:
                 await self._execute_target(spec, target, broker, data.prices, tick)
 
     async def shutdown(self, reason: str) -> None:
-        for spec in self._specs.values():
-            await self._execution.flatten(spec)
+        await asyncio.gather(*(self._execution.flatten(spec) for spec in self._specs.values()))
         self._status.write({"ready": True, "status": "stopped", "reason": reason})
 
     async def _execute_target(self, spec: StrategySpec, target: PortfolioTarget, broker, prices, tick: Tick) -> None:
@@ -104,9 +104,9 @@ class Supervisor:
         self._events.record("orders_filled", {"strategy": spec.name, "count": len(fills)})
         self._write_status(True, tick, None)
 
-    async def _handle_block(self, spec: StrategySpec, reason: str) -> None:
+    async def _handle_block(self, spec: StrategySpec, tick: Tick, reason: str) -> None:
         self._events.record("risk_block", {"strategy": spec.name, "reason": reason})
-        self._status.write({"ready": True, "status": "running", "last_block": reason})
+        self._write_status(True, tick, reason)
 
     def _write_status(self, ready: bool, tick: Tick, reason: str | None) -> None:
         payload = {

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Mapping, Sequence
 
-from domain.market import DataRequest, Quote
+from domain.market import DataRequest, Quote, require_finite, require_symbol
 from domain.orders import OrderIntent, OrderState
 from domain.portfolio import BrokerSnapshot, Position
 
@@ -38,8 +38,17 @@ class ReplayMarketData:
 
 
 class ReplayBroker:
-    def __init__(self, snapshot: BrokerSnapshot) -> None:
+    def __init__(
+        self,
+        snapshot: BrokerSnapshot,
+        *,
+        execution_prices: Mapping[str, float] | None = None,
+    ) -> None:
         self._snapshot = snapshot
+        self._execution_prices = {
+            require_symbol(symbol): require_finite(price, f"{symbol} execution price", positive=True)
+            for symbol, price in (execution_prices or {}).items()
+        }
         self.orders: list[OrderState] = []
 
     async def snapshot(self) -> BrokerSnapshot:
@@ -60,7 +69,8 @@ class ReplayBroker:
         return []
 
     async def submit(self, order: OrderIntent) -> OrderState:
-        filled_qty = order.qty if order.qty is not None else 1.0
+        execution_price = self._execution_prices.get(order.symbol)
+        filled_qty = order.qty if order.qty is not None else round(order.notional / self._require_price(order.symbol), 6)
         state = OrderState(
             id=f"replay-{len(self.orders) + 1}",
             client_order_id=order.client_order_id,
@@ -68,7 +78,7 @@ class ReplayBroker:
             side=order.side,
             status="filled",
             filled_qty=filled_qty,
-            filled_avg_price=1.0,
+            filled_avg_price=execution_price,
         )
         self.orders.append(state)
         qty = self._snapshot.positions.get(order.symbol, Position(order.symbol, 0.0)).qty
@@ -80,3 +90,9 @@ class ReplayBroker:
 
     async def get_order(self, order_id: str) -> OrderState | None:
         return next((order for order in self.orders if order.id == order_id), None)
+
+    def _require_price(self, symbol: str) -> float:
+        try:
+            return self._execution_prices[symbol]
+        except KeyError as exc:
+            raise ValueError(f"{symbol}: missing replay execution price for notional order") from exc

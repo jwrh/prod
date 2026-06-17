@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 from domain.strategy import StrategySpec
@@ -30,18 +31,22 @@ class RuntimeComponents:
 
     async def start(self) -> None:
         await self.data_hub.connect()
-        await self.data_hub.warmup(self.specs)
-        await self.recovery.recover(self.specs)
+        await self._prepare_runtime_state()
 
     async def reconnect(self) -> None:
         self.data_hub.mark_disconnected()
         await self.data_hub.disconnect()
         await self.data_hub.connect()
-        await self.data_hub.warmup(self.specs)
-        await self.recovery.recover(self.specs)
+        await self._prepare_runtime_state()
 
     async def stop(self, reason: str) -> None:
         await self.data_hub.disconnect()
+
+    async def _prepare_runtime_state(self) -> None:
+        await asyncio.gather(
+            self.data_hub.warmup(self.specs),
+            self.recovery.recover(self.specs),
+        )
 
 
 class RuntimeCompositionRoot:

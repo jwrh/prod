@@ -37,6 +37,8 @@ class RuntimeConfigLoader:
     """Owns conversion from raw YAML into runtime domain objects."""
 
     ROOT_KEYS = frozenset({"data", "broker", "observability", "risk", "strategies"})
+    DATA_ADAPTERS = frozenset({"ibkr", "replay"})
+    BROKER_ADAPTERS = frozenset({"alpaca", "paper"})
     STRATEGY_KEYS = frozenset(
         {"name", "class", "universe", "schedule", "data", "capital", "risk", "params", "allow_adoption"}
     )
@@ -48,12 +50,26 @@ class RuntimeConfigLoader:
     def from_mapping(self, raw: Mapping[str, Any]) -> RuntimeConfig:
         self._reject(raw, self.ROOT_KEYS, "root")
         root_risk = self._risk(raw.get("risk", {}) or {})
+        strategies = self._required(raw, "strategies")
+        if not strategies:
+            raise ValueError("at least one strategy is required")
+        loaded_strategies = tuple(self._strategy(row, root_risk) for row in strategies)
+        seen_names: set[str] = set()
+        symbol_owners: dict[str, str] = {}
+        for spec in loaded_strategies:
+            if spec.name in seen_names:
+                raise ValueError(f"duplicate strategy name: {spec.name}")
+            seen_names.add(spec.name)
+            for symbol in spec.universe:
+                if symbol in symbol_owners:
+                    raise ValueError(f"symbol {symbol} appears in multiple strategy universes")
+                symbol_owners[symbol] = spec.name
         return RuntimeConfig(
-            data=self._adapter(self._required(raw, "data")),
-            broker=self._adapter(self._required(raw, "broker")),
+            data=self._adapter(self._required(raw, "data"), "data", self.DATA_ADAPTERS),
+            broker=self._adapter(self._required(raw, "broker"), "broker", self.BROKER_ADAPTERS),
             observability=self._observability(raw.get("observability", {}) or {}),
             risk=root_risk,
-            strategies=tuple(self._strategy(row, root_risk) for row in self._required(raw, "strategies")),
+            strategies=loaded_strategies,
         )
 
     def _strategy(self, raw: Mapping[str, Any], root_risk: RiskSpec) -> StrategySpec:
@@ -74,7 +90,7 @@ class RuntimeConfigLoader:
             capital=CapitalSpec(amount=float(self._required(capital, "amount"))),
             risk=root_risk.merged_with(self._risk(raw.get("risk", {}) or {})),
             params=dict(raw.get("params", {}) or {}),
-            allow_adoption=bool(raw.get("allow_adoption", False)),
+            allow_adoption=self._bool(raw.get("allow_adoption", False), "strategies[].allow_adoption"),
         )
 
     def _risk(self, raw: Mapping[str, Any]) -> RiskSpec:
@@ -87,9 +103,12 @@ class RuntimeConfigLoader:
             venue_rules={symbol: VenueRule(**value) for symbol, value in rules.items()},
         )
 
-    def _adapter(self, raw: Mapping[str, Any]) -> AdapterConfig:
+    def _adapter(self, raw: Mapping[str, Any], path: str, supported: frozenset[str]) -> AdapterConfig:
+        adapter = str(self._required(raw, "adapter")).strip()
+        if adapter not in supported:
+            raise ValueError(f"unsupported {path} adapter: {adapter}")
         return AdapterConfig(
-            adapter=str(self._required(raw, "adapter")),
+            adapter=adapter,
             settings={key: value for key, value in raw.items() if key != "adapter"},
         )
 
@@ -103,6 +122,11 @@ class RuntimeConfigLoader:
         if key not in raw:
             raise ValueError(f"missing required key: {key}")
         return raw[key]
+
+    def _bool(self, value: Any, path: str) -> bool:
+        if not isinstance(value, bool):
+            raise ValueError(f"{path} must be boolean")
+        return value
 
     def _reject(self, raw: Mapping[str, Any], allowed: frozenset[str], path: str) -> None:
         extra = sorted(set(raw) - allowed)

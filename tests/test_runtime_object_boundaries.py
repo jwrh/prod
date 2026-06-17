@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import date, datetime, timezone
+from types import SimpleNamespace
 
 import pytest
 
@@ -92,6 +94,115 @@ def test_adapter_factory_rejects_unknown_adapter_names():
 
     with pytest.raises(ValueError, match="unsupported data adapter: nope"):
         AdapterFactory().build_data(AdapterConfig("nope", {}))
+
+
+def test_adapter_factory_rejects_non_boolean_alpaca_paper_flag(monkeypatch):
+    from runtime.config import AdapterConfig
+    from runtime.factories import AdapterFactory
+
+    def broker_kwargs(**kwargs):
+        return kwargs
+
+    monkeypatch.setattr("runtime.factories.AlpacaBroker", broker_kwargs)
+
+    with pytest.raises(ValueError, match="broker.paper must be boolean"):
+        AdapterFactory({"ALPACA_API_KEY": "key", "ALPACA_API_SECRET": "secret"}).build_broker(
+            AdapterConfig("alpaca", {"paper": "false"})
+        )
+
+
+def test_ibkr_warmup_fetches_independent_windows_concurrently(async_gate):
+    from adapters.data.ibkr import IBKRMarketData
+    from domain.market import DataRequest
+
+    class ConcurrentIBKR(IBKRMarketData):
+        def __init__(self, gate):
+            super().__init__(host="127.0.0.1", port=4002, client_id=1)
+            self._ib = object()
+            self.gate = gate
+
+        async def _bars_for(self, request):
+            await self.gate.enter(request.key)
+            return {symbol: [1.0, 2.0] for symbol in request.symbols}
+
+    async def run():
+        gate = async_gate()
+        feed = ConcurrentIBKR(gate)
+        requests = (
+            DataRequest("alpha", "fast", ("AAA",), "1m", 2),
+            DataRequest("beta", "fast", ("BBB",), "1m", 2),
+        )
+        task = asyncio.create_task(feed.warmup(requests))
+        await gate.wait_and_release()
+        return gate, await task
+
+    gate, rows = asyncio.run(run())
+
+    assert gate.started == ["alpha:fast:1m:2", "beta:fast:1m:2"]
+    assert rows["alpha:fast:1m:2"] == {"AAA": [1.0, 2.0]}
+    assert rows["beta:fast:1m:2"] == {"BBB": [1.0, 2.0]}
+
+
+def test_alpaca_broker_cancels_open_orders_concurrently(monkeypatch, async_gate):
+    from adapters.broker.alpaca import AlpacaBroker
+    from domain.orders import OrderState
+
+    broker = AlpacaBroker.__new__(AlpacaBroker)
+    broker._client = SimpleNamespace(cancel_order_by_id=lambda order_id: None)
+    gate = async_gate()
+
+    async def list_open_orders(symbols):
+        return (
+            OrderState("order-1", None, "AAA", "buy", "new"),
+            OrderState("order-2", None, "BBB", "buy", "new"),
+        )
+
+    async def fake_to_thread(fn, order_id):
+        await gate.enter(order_id)
+
+    broker.list_open_orders = list_open_orders
+    monkeypatch.setattr("adapters.broker.alpaca.asyncio.to_thread", fake_to_thread)
+
+    async def run():
+        task = asyncio.create_task(broker.cancel_open_orders(("AAA", "BBB")))
+        await gate.wait_and_release()
+        await task
+
+    asyncio.run(run())
+
+    assert gate.started == ["order-1", "order-2"]
+
+
+def test_alpaca_broker_closes_positions_concurrently(monkeypatch, async_gate):
+    from adapters.broker.alpaca import AlpacaBroker
+
+    broker = AlpacaBroker.__new__(AlpacaBroker)
+    broker._client = SimpleNamespace(close_position=lambda symbol_or_asset_id: None)
+    gate = async_gate()
+
+    async def fake_to_thread(fn, *, symbol_or_asset_id):
+        await gate.enter(symbol_or_asset_id)
+        return SimpleNamespace(
+            id=f"close-{symbol_or_asset_id}",
+            client_order_id=None,
+            symbol=symbol_or_asset_id,
+            side="sell",
+            status="filled",
+            filled_qty="1",
+            filled_avg_price="25",
+        )
+
+    monkeypatch.setattr("adapters.broker.alpaca.asyncio.to_thread", fake_to_thread)
+
+    async def run():
+        task = asyncio.create_task(broker.close_positions(("AAA", "BBB")))
+        await gate.wait_and_release()
+        return await task
+
+    orders = asyncio.run(run())
+
+    assert gate.started == ["AAA", "BBB"]
+    assert [order.symbol for order in orders] == ["AAA", "BBB"]
 
 
 def test_strategy_factory_loads_configured_strategy_class():

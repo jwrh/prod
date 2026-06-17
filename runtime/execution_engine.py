@@ -29,9 +29,8 @@ class ExecutionEngine:
             await self._broker.cancel_open_orders(spec.universe)
         filled: list[OrderState] = []
         try:
-            for intent in intents:
-                state = await self._broker.submit(intent)
-                filled.append(await self._wait_terminal(state))
+            for batch in self._same_side_batches(intents):
+                filled.extend(await self._execute_batch(batch))
         except Exception as exc:
             await self._broker.cancel_open_orders(spec.universe)
             await self._broker.close_positions(spec.universe)
@@ -43,6 +42,30 @@ class ExecutionEngine:
     async def flatten(self, spec: StrategySpec) -> list[OrderState]:
         await self._broker.cancel_open_orders(spec.universe)
         return list(await self._broker.close_positions(spec.universe))
+
+    async def _execute_batch(self, intents: list[OrderIntent]) -> list[OrderState]:
+        results = await asyncio.gather(
+            *(self._submit_and_wait(intent) for intent in intents),
+            return_exceptions=True,
+        )
+        filled = []
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
+            filled.append(result)
+        return filled
+
+    async def _submit_and_wait(self, intent: OrderIntent) -> OrderState:
+        state = await self._broker.submit(intent)
+        return await self._wait_terminal(state)
+
+    def _same_side_batches(self, intents: list[OrderIntent]) -> tuple[list[OrderIntent], ...]:
+        batches: list[list[OrderIntent]] = []
+        for intent in intents:
+            if not batches or batches[-1][-1].side != intent.side:
+                batches.append([])
+            batches[-1].append(intent)
+        return tuple(batches)
 
     async def _wait_terminal(self, state: OrderState) -> OrderState:
         if state.status == "filled":

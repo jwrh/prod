@@ -99,6 +99,25 @@ def test_data_hub_owns_warmup_quote_fan_in_and_strategy_views():
     assert view.bid_ask["AAA"].ask == 26.01
 
 
+def test_data_hub_rejects_short_warmup_history_before_trading():
+    import pytest
+
+    from runtime.data_hub import DataHub
+
+    class Feed:
+        async def connect(self): ...
+        async def disconnect(self): ...
+        async def warmup(self, requests):
+            return {request.key: {"AAA": [25.0], "BBB": [30.0]} for request in requests}
+        async def subscribe(self, symbols, sink):
+            raise AssertionError("short warmup history must not subscribe")
+
+    hub = DataHub(Feed(), quote_ttl_seconds=60.0)
+
+    with pytest.raises(ValueError, match="demo:fast: expected 2 warmup rows, got 1"):
+        asyncio.run(hub.warmup((_spec(),)))
+
+
 def test_data_hub_updates_forming_bar_without_destroying_interval_window():
     import asyncio
 
@@ -211,6 +230,26 @@ def test_portfolio_engine_intents_are_deterministic_for_same_plan():
     )
 
     assert [order.client_order_id for order in first] == [order.client_order_id for order in second]
+
+
+def test_portfolio_engine_uses_price_grounded_qty_for_fractional_long_entries():
+    from domain.portfolio import AccountSnapshot, BrokerSnapshot, PortfolioTarget
+    from runtime.portfolio_engine import PortfolioEngine
+
+    spec = _spec()
+    broker = BrokerSnapshot(account=AccountSnapshot(equity=100_000.0, cash=100_000.0), positions={})
+
+    [intent] = PortfolioEngine().diff(
+        spec,
+        PortfolioTarget.weights({"AAA": 1.0}, "entry"),
+        broker,
+        prices={"AAA": 25.0, "BBB": 50.0},
+    )
+
+    assert intent.symbol == "AAA"
+    assert intent.side == "buy"
+    assert intent.qty == 400.0
+    assert intent.notional is None
 
 
 def test_fractional_long_positions_can_be_trimmed_without_residuals():

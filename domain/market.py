@@ -58,6 +58,8 @@ class Quote:
         object.__setattr__(self, "price", require_finite(self.price, "price", positive=True))
         if self.now is None:
             object.__setattr__(self, "now", datetime.now(timezone.utc))
+        elif not isinstance(self.now, datetime) or self.now.tzinfo is None or self.now.utcoffset() is None:
+            raise ValueError("quote timestamp must include timezone")
         if self.bid is not None or self.ask is not None:
             if self.bid is None or self.ask is None:
                 raise ValueError("bid and ask must be provided together")

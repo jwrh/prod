@@ -50,6 +50,135 @@ strategies:
         load_runtime_config(bad)
 
 
+def test_config_check_rejects_unknown_adapter_names(tmp_path):
+    import pytest
+
+    from runtime.registry import load_runtime_config
+
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        """
+data:
+  adapter: nope
+broker:
+  adapter: paper
+strategies:
+  - name: demo
+    class: strategies.dummy.DummyStrategy
+    universe: [AAA]
+    schedule: {rebalance: 1m}
+    data:
+      windows:
+        - {name: fast, interval: 1m, lookback: 2}
+    capital: {mode: notional, amount: 10000}
+    params: {weights: {AAA: 1.0}}
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="unsupported data adapter: nope"):
+        load_runtime_config(config)
+
+
+def test_config_check_requires_at_least_one_strategy(tmp_path):
+    import pytest
+
+    from runtime.registry import load_runtime_config
+
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        """
+data:
+  adapter: replay
+broker:
+  adapter: paper
+strategies: []
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="at least one strategy is required"):
+        load_runtime_config(config)
+
+
+def test_config_check_rejects_duplicate_strategy_names(tmp_path):
+    import pytest
+
+    from runtime.registry import load_runtime_config
+
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        """
+data:
+  adapter: replay
+broker:
+  adapter: paper
+strategies:
+  - name: demo
+    class: strategies.dummy.DummyStrategy
+    universe: [AAA]
+    schedule: {rebalance: 1m}
+    data:
+      windows:
+        - {name: fast, interval: 1m, lookback: 2}
+    capital: {mode: notional, amount: 10000}
+    params: {weights: {AAA: 1.0}}
+  - name: demo
+    class: strategies.dummy.DummyStrategy
+    universe: [BBB]
+    schedule: {rebalance: 1m}
+    data:
+      windows:
+        - {name: fast, interval: 1m, lookback: 2}
+    capital: {mode: notional, amount: 10000}
+    params: {weights: {BBB: 1.0}}
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="duplicate strategy name: demo"):
+        load_runtime_config(config)
+
+
+def test_config_check_rejects_overlapping_strategy_universes(tmp_path):
+    import pytest
+
+    from runtime.registry import load_runtime_config
+
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        """
+data:
+  adapter: replay
+broker:
+  adapter: paper
+strategies:
+  - name: alpha
+    class: strategies.dummy.DummyStrategy
+    universe: [AAA]
+    schedule: {rebalance: 1m}
+    data:
+      windows:
+        - {name: fast, interval: 1m, lookback: 2}
+    capital: {mode: notional, amount: 10000}
+    params: {weights: {AAA: 1.0}}
+  - name: beta
+    class: strategies.dummy.DummyStrategy
+    universe: [AAA, BBB]
+    schedule: {rebalance: 1m}
+    data:
+      windows:
+        - {name: fast, interval: 1m, lookback: 2}
+    capital: {mode: notional, amount: 10000}
+    params: {weights: {BBB: 1.0}}
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="symbol AAA appears in multiple strategy universes"):
+        load_runtime_config(config)
+
+
 def test_root_risk_policy_is_strategy_default_until_overridden(tmp_path):
     from runtime.registry import load_runtime_config
 
@@ -67,6 +196,7 @@ risk:
   max_drawdown_pct: 5.0
   venue_rules:
     AAA: {longs_fractional_ok: true, shortable: false}
+    BBB: {longs_fractional_ok: true, shortable: false}
 strategies:
   - name: inherited
     class: strategies.dummy.DummyStrategy
@@ -79,7 +209,7 @@ strategies:
     params: {weights: {AAA: 1.0}}
   - name: overridden
     class: strategies.dummy.DummyStrategy
-    universe: [AAA]
+    universe: [BBB]
     schedule: {rebalance: 1m}
     data:
       windows:
@@ -88,8 +218,8 @@ strategies:
     risk:
       max_notional_per_order: 20000
       venue_rules:
-        AAA: {longs_fractional_ok: true, shortable: true}
-    params: {weights: {AAA: 1.0}}
+        BBB: {longs_fractional_ok: true, shortable: true}
+    params: {weights: {BBB: 1.0}}
 """,
     )
 
@@ -104,7 +234,38 @@ strategies:
     assert overridden.risk.max_notional_per_order == 20000
     assert overridden.risk.max_gross_notional == 25000
     assert overridden.risk.max_drawdown_pct == 5.0
-    assert overridden.risk.venue_rules["AAA"].shortable is True
+    assert overridden.risk.venue_rules["BBB"].shortable is True
+
+
+def test_config_loader_rejects_string_booleans_for_recovery_adoption(tmp_path):
+    import pytest
+
+    from runtime.registry import load_runtime_config
+
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        """
+data:
+  adapter: replay
+broker:
+  adapter: paper
+strategies:
+  - name: demo
+    class: strategies.dummy.DummyStrategy
+    universe: [AAA]
+    schedule: {rebalance: 1m}
+    data:
+      windows:
+        - {name: fast, interval: 1m, lookback: 2}
+    capital: {mode: notional, amount: 10000}
+    allow_adoption: "false"
+    params: {weights: {AAA: 1.0}}
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="strategies\\[\\]\\.allow_adoption must be boolean"):
+        load_runtime_config(config)
 
 
 def test_ci_workflow_runs_design_acceptance_commands():
@@ -152,7 +313,35 @@ def test_replay_adapters_satisfy_ports_without_live_services():
     warm = asyncio.run(data.warmup((DataRequest("demo", "fast", ("AAA",), "1m", 2),)))
     assert warm["demo:fast:1m:2"]["AAA"] == [24.0, 25.0]
 
-    broker = ReplayBroker(BrokerSnapshot(AccountSnapshot(100_000.0, 100_000.0), positions={}))
+    broker = ReplayBroker(
+        BrokerSnapshot(AccountSnapshot(100_000.0, 100_000.0), positions={}),
+        execution_prices={"AAA": 25.0},
+    )
     order = asyncio.run(broker.submit(OrderIntent("AAA", "buy", notional=1000.0)))
     assert order.status == "filled"
     assert asyncio.run(broker.list_open_orders(("AAA",))) == []
+
+
+def test_replay_broker_prices_notional_fills_from_ground_truth_prices():
+    import asyncio
+
+    import pytest
+
+    from adapters.replay import ReplayBroker
+    from domain.orders import OrderIntent
+    from domain.portfolio import AccountSnapshot, BrokerSnapshot
+
+    unpriced = ReplayBroker(BrokerSnapshot(AccountSnapshot(100_000.0, 100_000.0), positions={}))
+    with pytest.raises(ValueError, match="AAA: missing replay execution price"):
+        asyncio.run(unpriced.submit(OrderIntent("AAA", "buy", notional=1000.0)))
+
+    broker = ReplayBroker(
+        BrokerSnapshot(AccountSnapshot(100_000.0, 100_000.0), positions={}),
+        execution_prices={"AAA": 25.0},
+    )
+    order = asyncio.run(broker.submit(OrderIntent("AAA", "buy", notional=1000.0)))
+    snapshot = asyncio.run(broker.snapshot())
+
+    assert order.filled_qty == 40.0
+    assert order.filled_avg_price == 25.0
+    assert snapshot.positions["AAA"].qty == 40.0

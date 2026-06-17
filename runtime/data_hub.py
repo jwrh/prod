@@ -58,7 +58,16 @@ class DataHub:
         )
         warm = await self._feed.warmup(requests)
         for request in requests:
-            values = coerce_warmup_rows(warm[request.key], request.symbols)[-request.lookback :]
+            try:
+                rows = warm[request.key]
+            except KeyError as exc:
+                raise ValueError(f"{request.strategy}:{request.name}: missing warmup rows") from exc
+            values = coerce_warmup_rows(rows, request.symbols)
+            if values.shape[0] < request.lookback:
+                raise ValueError(
+                    f"{request.strategy}:{request.name}: expected {request.lookback} warmup rows, got {values.shape[0]}"
+                )
+            values = values[-request.lookback :]
             self._windows[(request.strategy, request.name)] = _WindowState(request, values)
         symbols = tuple(dict.fromkeys(symbol for spec in specs for symbol in spec.universe))
         await self._feed.subscribe(symbols, self.on_quote)
