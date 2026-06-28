@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import date, datetime, timezone
+
+import pytest
 
 
 def _spec(name="demo", universe=("AAA",), *, risk=None):
@@ -291,6 +294,14 @@ def test_strategy_runner_terminates_timed_out_evaluation_process():
     assert result.reason == "strategy_timeout"
 
 
+def test_strategy_timeout_reason_is_stable_runtime_reason_code():
+    from runtime.reasons import ReasonCode
+    from runtime.strategy_runner import StrategyTimedOut
+
+    assert StrategyTimedOut().reason is ReasonCode.STRATEGY_TIMEOUT
+    assert StrategyTimedOut().reason == "strategy_timeout"
+
+
 def test_execution_engine_submits_same_side_orders_concurrently_before_buys(async_gate):
     from domain.orders import OrderIntent, OrderState
     from runtime.execution_engine import ExecutionEngine
@@ -429,21 +440,27 @@ def test_recovery_checks_independent_strategy_universes_concurrently(async_gate)
 def test_runtime_components_reconnect_rewarms_data_and_recovers_broker_state(async_gate):
     from runtime.composition import RuntimeComponents
 
+    calls = []
+
     class DataHub:
         def __init__(self, gate):
             self.calls = []
             self.gate = gate
 
         def mark_disconnected(self):
+            calls.append(("data", "mark_disconnected"))
             self.calls.append(("mark_disconnected", None))
 
         async def disconnect(self):
+            calls.append(("data", "disconnect"))
             self.calls.append(("disconnect", None))
 
         async def connect(self):
+            calls.append(("data", "connect"))
             self.calls.append(("connect", None))
 
         async def warmup(self, specs):
+            calls.append(("data", "warmup"))
             self.calls.append(("warmup", specs))
             await self.gate.enter("warmup")
 
@@ -456,11 +473,15 @@ def test_runtime_components_reconnect_rewarms_data_and_recovers_broker_state(asy
             self.calls.append(specs)
             await self.gate.enter("recover")
 
+    class Status:
+        def write(self, payload):
+            calls.append(("status", payload))
+
     specs = (_spec(),)
     gate = async_gate()
     data_hub = DataHub(gate)
     recovery = Recovery(gate)
-    components = RuntimeComponents(data_hub=data_hub, recovery=recovery, specs=specs)
+    components = RuntimeComponents(data_hub=data_hub, recovery=recovery, specs=specs, status=Status())
 
     async def run():
         task = asyncio.create_task(components.reconnect())
@@ -477,6 +498,156 @@ def test_runtime_components_reconnect_rewarms_data_and_recovers_broker_state(asy
     ]
     assert recovery.calls == [specs]
     assert set(gate.started) == {"warmup", "recover"}
+    assert calls[0] == (
+        "status",
+        {"ready": False, "status": "reconnecting", "active_strategies": ["demo"]},
+    )
+
+
+def test_runtime_components_marks_not_ready_before_startup_recovery():
+    from runtime.composition import RuntimeComponents
+    from runtime.recovery import RecoveryResult
+
+    class DataHub:
+        async def connect(self): ...
+        async def disconnect(self): ...
+        async def warmup(self, specs): ...
+
+    class Recovery:
+        async def recover(self, specs):
+            return RecoveryResult(clean=True, ready=True, incidents=())
+
+    status = StatusRecorder()
+    components = RuntimeComponents(
+        data_hub=DataHub(),
+        recovery=Recovery(),
+        specs=(_spec(),),
+        status=status,
+    )
+
+    asyncio.run(components.start())
+
+    assert status.rows[0] == {
+        "ready": False,
+        "status": "starting",
+        "active_strategies": ["demo"],
+    }
+
+
+def test_runtime_components_records_recovery_visibility_on_start(tmp_path):
+    from observability.health import check_result
+    from observability.status import StatusWriter
+    from runtime.composition import RuntimeComponents
+    from runtime.recovery import RecoveryResult
+
+    class DataHub:
+        async def connect(self): ...
+        async def disconnect(self): ...
+        async def warmup(self, specs): ...
+
+    class Recovery:
+        async def recover(self, specs):
+            return RecoveryResult(
+                clean=False,
+                ready=True,
+                incidents=("open_orders_cancelled:demo", "positions_flattened:demo"),
+            )
+
+    events = EventRecorder()
+    status_path = tmp_path / "status.json"
+    status = StatusWriter(status_path)
+    components = RuntimeComponents(
+        data_hub=DataHub(),
+        recovery=Recovery(),
+        specs=(_spec(),),
+        events=events,
+        status=status,
+    )
+
+    asyncio.run(components.start())
+
+    assert events.events == [
+        (
+            "recovery",
+            {
+                "clean": False,
+                "ready": True,
+                "incidents": ["open_orders_cancelled:demo", "positions_flattened:demo"],
+            },
+        )
+    ]
+    payload = json.loads(status_path.read_text(encoding="utf-8"))
+    assert payload["ready"] is False
+    assert payload["status"] == "running"
+    assert payload["active_strategies"] == ["demo"]
+    assert payload["recovery_ready"] is True
+    assert payload["recovery_clean"] is False
+    assert payload["recovery_incidents"] == ["open_orders_cancelled:demo", "positions_flattened:demo"]
+    assert check_result(status_path, required_strategies=("demo",)) == (1, "not ready")
+
+
+def test_runtime_components_records_recovery_when_warmup_fails(tmp_path):
+    from observability.status import StatusWriter
+    from runtime.composition import RuntimeComponents
+    from runtime.recovery import RecoveryResult
+
+    class DataHub:
+        async def connect(self): ...
+        async def disconnect(self): ...
+        async def warmup(self, specs):
+            raise RuntimeError("warmup failed")
+
+    class Recovery:
+        async def recover(self, specs):
+            return RecoveryResult(clean=False, ready=True, incidents=("open_orders_cancelled:demo",))
+
+    events = EventRecorder()
+    status_path = tmp_path / "status.json"
+    components = RuntimeComponents(
+        data_hub=DataHub(),
+        recovery=Recovery(),
+        specs=(_spec(),),
+        events=events,
+        status=StatusWriter(status_path),
+    )
+
+    with pytest.raises(RuntimeError, match="warmup failed"):
+        asyncio.run(components.start())
+
+    assert events.events == [
+        ("recovery", {"clean": False, "ready": True, "incidents": ["open_orders_cancelled:demo"]})
+    ]
+    payload = json.loads(status_path.read_text(encoding="utf-8"))
+    assert payload["recovery_incidents"] == ["open_orders_cancelled:demo"]
+
+
+def test_runtime_components_surfaces_warmup_failure_before_slow_recovery():
+    from runtime.composition import RuntimeComponents
+
+    class DataHub:
+        async def connect(self): ...
+        async def disconnect(self): ...
+        async def warmup(self, specs):
+            raise RuntimeError("warmup failed")
+
+    class Recovery:
+        def __init__(self):
+            self.cancelled = False
+
+        async def recover(self, specs):
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                self.cancelled = True
+                raise
+
+    recovery = Recovery()
+    components = RuntimeComponents(data_hub=DataHub(), recovery=recovery, specs=(_spec(),))
+
+    with pytest.raises(RuntimeError, match="warmup failed"):
+        asyncio.run(asyncio.wait_for(components.start(), timeout=0.2))
+
+    assert recovery.cancelled is True
 
 
 def test_runtime_app_reconnects_components_after_connection_failure():
@@ -506,9 +677,182 @@ def test_runtime_app_reconnects_components_after_connection_failure():
     components = Components()
     app = RuntimeApp(components=components, scheduler=Scheduler(), supervisor=Supervisor())
 
+    with pytest.raises(ConnectionError, match="feed disconnected"):
+        asyncio.run(app.run_once(datetime(2026, 6, 12, 14, 30, tzinfo=timezone.utc)))
+
+    assert components.reconnects == 1
+
+
+def test_runtime_app_retries_connection_failure_ticks_after_reconnect():
+    from runtime.app import RuntimeApp
+    from runtime.scheduler import Tick
+
+    class Components:
+        def __init__(self):
+            self.reconnects = 0
+
+        async def start(self): ...
+        async def stop(self, reason): ...
+        async def reconnect(self):
+            self.reconnects += 1
+
+    class Scheduler:
+        def due_ticks(self, now):
+            return [Tick("demo", now, date(2026, 6, 12), "rebalance")]
+        def sleep_seconds(self):
+            return 60.0
+
+    class Supervisor:
+        def __init__(self):
+            self.calls = 0
+
+        async def on_tick(self, tick):
+            self.calls += 1
+            if self.calls == 1:
+                raise ConnectionError("feed disconnected")
+
+        async def shutdown(self, reason): ...
+
+    components = Components()
+    supervisor = Supervisor()
+    app = RuntimeApp(components=components, scheduler=Scheduler(), supervisor=supervisor)
+
     asyncio.run(app.run_once(datetime(2026, 6, 12, 14, 30, tzinfo=timezone.utc)))
 
     assert components.reconnects == 1
+    assert supervisor.calls == 2
+
+
+def test_runtime_app_raises_connection_error_when_retry_still_fails():
+    from runtime.app import RuntimeApp
+    from runtime.scheduler import Tick
+
+    class Components:
+        def __init__(self):
+            self.reconnects = 0
+
+        async def start(self): ...
+        async def stop(self, reason): ...
+        async def reconnect(self):
+            self.reconnects += 1
+
+    class Scheduler:
+        def due_ticks(self, now):
+            return [Tick("demo", now, date(2026, 6, 12), "rebalance")]
+        def sleep_seconds(self):
+            return 60.0
+
+    class Supervisor:
+        def __init__(self):
+            self.calls = 0
+
+        async def on_tick(self, tick):
+            self.calls += 1
+            raise ConnectionError("feed disconnected")
+
+        async def shutdown(self, reason): ...
+
+    components = Components()
+    supervisor = Supervisor()
+    app = RuntimeApp(components=components, scheduler=Scheduler(), supervisor=supervisor)
+
+    with pytest.raises(ConnectionError, match="feed disconnected"):
+        asyncio.run(app.run_once(datetime(2026, 6, 12, 14, 30, tzinfo=timezone.utc)))
+
+    assert components.reconnects == 1
+    assert supervisor.calls == 2
+
+
+def test_runtime_app_prioritizes_fatal_errors_after_reconnect_retry():
+    from runtime.app import RuntimeApp
+    from runtime.scheduler import Tick
+
+    class Components:
+        def __init__(self):
+            self.reconnects = 0
+
+        async def start(self): ...
+        async def stop(self, reason): ...
+        async def reconnect(self):
+            self.reconnects += 1
+
+    class Scheduler:
+        def due_ticks(self, now):
+            return [
+                Tick("connection", now, date(2026, 6, 12), "rebalance"),
+                Tick("fatal", now, date(2026, 6, 12), "rebalance"),
+            ]
+        def sleep_seconds(self):
+            return 60.0
+
+    class Supervisor:
+        def __init__(self):
+            self.calls = []
+
+        async def on_tick(self, tick):
+            self.calls.append(tick.strategy_name)
+            if self.calls.count(tick.strategy_name) == 1:
+                raise ConnectionError("feed disconnected")
+            if tick.strategy_name == "connection":
+                raise ConnectionError("feed disconnected")
+            raise RuntimeError("fatal after reconnect")
+
+        async def shutdown(self, reason): ...
+
+    components = Components()
+    supervisor = Supervisor()
+    app = RuntimeApp(components=components, scheduler=Scheduler(), supervisor=supervisor)
+
+    with pytest.raises(RuntimeError, match="fatal after reconnect"):
+        asyncio.run(app.run_once(datetime(2026, 6, 12, 14, 30, tzinfo=timezone.utc)))
+
+    assert components.reconnects == 1
+    assert supervisor.calls == ["connection", "fatal", "connection", "fatal"]
+
+
+def test_runtime_app_does_not_retry_connection_failure_when_batch_has_fatal_error():
+    from runtime.app import RuntimeApp
+    from runtime.scheduler import Tick
+
+    class Components:
+        def __init__(self):
+            self.reconnects = 0
+
+        async def start(self): ...
+        async def stop(self, reason): ...
+        async def reconnect(self):
+            self.reconnects += 1
+
+    class Scheduler:
+        def due_ticks(self, now):
+            return [
+                Tick("connection", now, date(2026, 6, 12), "rebalance"),
+                Tick("fatal", now, date(2026, 6, 12), "rebalance"),
+            ]
+        def sleep_seconds(self):
+            return 60.0
+
+    class Supervisor:
+        def __init__(self):
+            self.calls = []
+
+        async def on_tick(self, tick):
+            self.calls.append(tick.strategy_name)
+            if tick.strategy_name == "connection":
+                raise ConnectionError("feed disconnected")
+            raise RuntimeError("fatal")
+
+        async def shutdown(self, reason): ...
+
+    components = Components()
+    supervisor = Supervisor()
+    app = RuntimeApp(components=components, scheduler=Scheduler(), supervisor=supervisor)
+
+    with pytest.raises(RuntimeError, match="fatal"):
+        asyncio.run(app.run_once(datetime(2026, 6, 12, 14, 30, tzinfo=timezone.utc)))
+
+    assert components.reconnects == 0
+    assert supervisor.calls == ["connection", "fatal"]
 
 
 def test_runtime_app_runs_due_strategy_ticks_concurrently(async_gate):

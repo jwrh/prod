@@ -9,6 +9,7 @@ from typing import Any
 
 from domain.portfolio import PortfolioTarget
 from domain.strategy import Strategy, StrategyContext
+from runtime.reasons import ReasonCode
 
 
 @dataclass(frozen=True, slots=True)
@@ -23,7 +24,7 @@ class StrategyFailed:
 
 @dataclass(frozen=True, slots=True)
 class StrategyTimedOut:
-    reason: str = "strategy_timeout"
+    reason: str = ReasonCode.STRATEGY_TIMEOUT
 
 
 StrategyRunResult = StrategySucceeded | StrategyFailed | StrategyTimedOut

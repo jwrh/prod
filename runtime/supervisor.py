@@ -14,6 +14,7 @@ from runtime.data_hub import DataHub
 from runtime.errors import BrokerAmbiguous
 from runtime.execution_engine import ExecutionEngine
 from runtime.portfolio_engine import PortfolioEngine
+from runtime.reasons import ReasonCode
 from runtime.risk_engine import RiskAllowed, RiskBlocked, RiskEngine, RiskFlatten
 from runtime.scheduler import Tick
 from runtime.strategy_runner import StrategyFailed, StrategyRunner, StrategySucceeded, StrategyTimedOut
@@ -73,7 +74,7 @@ class Supervisor:
             case StrategyFailed(error=error):
                 self.ready = False
                 self._events.record("decision", {"strategy": spec.name, "status": "failed", "error": error})
-                self._write_status(False, tick, "strategy_failed")
+                self._write_status(False, tick, ReasonCode.STRATEGY_FAILED)
                 return
         self._events.record("decision", {"strategy": spec.name, "action": target.action, "reason": target.reason})
         match self._risk.check(spec, target, broker, data):
@@ -98,7 +99,7 @@ class Supervisor:
         except BrokerAmbiguous as exc:
             self.ready = False
             self._events.record("broker_ambiguous", {"strategy": spec.name, "error": str(exc)})
-            self._write_status(False, tick, "broker_ambiguous")
+            self._write_status(False, tick, ReasonCode.BROKER_AMBIGUOUS)
             return
         self._events.record("orders_submitted", {"strategy": spec.name, "count": len(intents)})
         self._events.record("orders_filled", {"strategy": spec.name, "count": len(fills)})

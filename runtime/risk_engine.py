@@ -9,6 +9,7 @@ from domain.portfolio import BrokerSnapshot, PortfolioTarget, VenueRule
 from domain.strategy import StrategySpec
 from runtime.data_hub import DataView
 from runtime.portfolio_engine import PortfolioLine, PortfolioPlan
+from runtime.reasons import ReasonCode
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,10 +77,12 @@ class RiskAssessment:
 
     @property
     def unshortable_targets(self) -> tuple[str, ...]:
+        if self.missing_target_prices:
+            return ()
         return tuple(
-            symbol
-            for symbol, weight in self.target.weights.items()
-            if weight < 0 and not self.venue_rule(symbol).shortable
+            line.symbol
+            for line in self.planned_order_lines
+            if line.target_qty < 0 and line.entry_qty > 0 and not line.rule.shortable
         )
 
     @property
@@ -127,7 +130,7 @@ class FreshTargetDataRule:
     def evaluate(self, assessment: RiskAssessment) -> RiskDecision:
         match assessment.target.action, assessment.data.fresh:
             case "target", False:
-                return RiskBlocked(assessment.data.block_reason or "stale_quotes")
+                return RiskBlocked(assessment.data.block_reason or ReasonCode.STALE_QUOTES)
             case _:
                 return RiskAllowed()
 
@@ -135,32 +138,32 @@ class FreshTargetDataRule:
 @dataclass(frozen=True, slots=True)
 class UnpricedExposureRule:
     def evaluate(self, assessment: RiskAssessment) -> RiskDecision:
-        return RiskFlatten("missing_position_price") if assessment.unpriced_exposure else RiskAllowed()
+        return RiskFlatten(ReasonCode.MISSING_POSITION_PRICE) if assessment.unpriced_exposure else RiskAllowed()
 
 
 @dataclass(frozen=True, slots=True)
 class TargetUniverseRule:
     def evaluate(self, assessment: RiskAssessment) -> RiskDecision:
-        return RiskBlocked("target_outside_universe") if assessment.outside_universe else RiskAllowed()
+        return RiskBlocked(ReasonCode.TARGET_OUTSIDE_UNIVERSE) if assessment.outside_universe else RiskAllowed()
 
 
 @dataclass(frozen=True, slots=True)
 class ShortSaleRule:
     def evaluate(self, assessment: RiskAssessment) -> RiskDecision:
-        return RiskBlocked("short_not_allowed") if assessment.unshortable_targets else RiskAllowed()
+        return RiskBlocked(ReasonCode.SHORT_NOT_ALLOWED) if assessment.unshortable_targets else RiskAllowed()
 
 
 @dataclass(frozen=True, slots=True)
 class MissingTargetPriceRule:
     def evaluate(self, assessment: RiskAssessment) -> RiskDecision:
-        return RiskBlocked("missing_prices") if assessment.missing_target_prices else RiskAllowed()
+        return RiskBlocked(ReasonCode.MISSING_PRICES) if assessment.missing_target_prices else RiskAllowed()
 
 
 @dataclass(frozen=True, slots=True)
 class GrossNotionalRule:
     def evaluate(self, assessment: RiskAssessment) -> RiskDecision:
         return (
-            RiskBlocked("max_gross_notional")
+            RiskBlocked(ReasonCode.MAX_GROSS_NOTIONAL)
             if assessment.projected_gross_notional > assessment.gross_notional_limit
             else RiskAllowed()
         )
@@ -170,8 +173,22 @@ class GrossNotionalRule:
 class MaxOrderNotionalRule:
     def evaluate(self, assessment: RiskAssessment) -> RiskDecision:
         return (
-            RiskBlocked("max_notional_per_order")
+            RiskBlocked(ReasonCode.MAX_NOTIONAL_PER_ORDER)
             if any(line.planned_notional > assessment.max_order_notional for line in assessment.planned_order_lines)
+            else RiskAllowed()
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class VenueMaxOrderNotionalRule:
+    def evaluate(self, assessment: RiskAssessment) -> RiskDecision:
+        return (
+            RiskBlocked(ReasonCode.MAX_NOTIONAL_PER_ORDER)
+            if any(
+                line.rule.max_notional_per_order is not None
+                and line.planned_notional > line.rule.max_notional_per_order
+                for line in assessment.planned_order_lines
+            )
             else RiskAllowed()
         )
 
@@ -180,7 +197,7 @@ class MaxOrderNotionalRule:
 class MaxOrderQtyRule:
     def evaluate(self, assessment: RiskAssessment) -> RiskDecision:
         return (
-            RiskBlocked("max_qty_per_order")
+            RiskBlocked(ReasonCode.MAX_QTY_PER_ORDER)
             if any(line.planned_qty > assessment.max_order_qty for line in assessment.planned_order_lines)
             else RiskAllowed()
         )
@@ -190,7 +207,7 @@ class MaxOrderQtyRule:
 class DrawdownRule:
     def evaluate(self, assessment: RiskAssessment) -> RiskDecision:
         return (
-            RiskFlatten("max_drawdown_pct")
+            RiskFlatten(ReasonCode.MAX_DRAWDOWN_PCT)
             if assessment.drawdown_pct > assessment.max_drawdown_pct
             else RiskAllowed()
         )
@@ -207,6 +224,7 @@ class RiskEngine:
         MissingTargetPriceRule(),
         DrawdownRule(),
         GrossNotionalRule(),
+        VenueMaxOrderNotionalRule(),
         MaxOrderNotionalRule(),
         MaxOrderQtyRule(),
     )

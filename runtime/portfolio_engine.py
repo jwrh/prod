@@ -41,11 +41,11 @@ class PortfolioLine:
     def planned_qty(self) -> float:
         match self.delta > 0, self.rule.longs_fractional_ok:
             case True, True:
-                return round(self.delta, 6)
+                return self._fractional_qty(self.delta)
             case True, False:
                 return self._whole_lot_qty(self.delta)
             case False, _ if self._reduces_fractional_long:
-                return round(abs(self.delta), 6)
+                return self._fractional_qty(abs(self.delta))
             case False, _:
                 return self._whole_lot_qty(abs(self.delta))
 
@@ -54,8 +54,30 @@ class PortfolioLine:
         return round(self.planned_qty * self.price, 2)
 
     @property
+    def entry_notional(self) -> float:
+        return round(self.entry_qty * self.price, 2)
+
+    @property
+    def entry_qty(self) -> float:
+        match self.delta > 0:
+            case True if self.target_qty > 0:
+                return max(self.planned_qty - max(-self.current_qty, 0.0), 0.0)
+            case False if self.target_qty < 0:
+                return max(self.planned_qty - max(self.current_qty, 0.0), 0.0)
+            case _:
+                return 0.0
+
+    @property
     def _reduces_fractional_long(self) -> bool:
         return self.rule.longs_fractional_ok and self.current_qty > 0 and self.target_qty >= 0
+
+    @property
+    def _buy_notional_ok(self) -> bool:
+        return self.entry_qty == 0 or self.entry_notional >= self.rule.min_notional
+
+    @property
+    def _sell_notional_ok(self) -> bool:
+        return self.entry_qty == 0 or self.entry_notional >= self.rule.min_notional
 
     def intents(self, batch_key: str = "manual") -> tuple[OrderIntent, ...]:
         if not self.material:
@@ -66,20 +88,28 @@ class PortfolioLine:
                 qty = self.planned_qty
                 return (
                     OrderIntent(self.symbol, "buy", qty=qty, client_order_id=client_order_id),
-                ) if qty > 0 and self.planned_notional >= 1 else ()
+                ) if qty > 0 and self._buy_notional_ok else ()
             case True, False:
                 qty = self.planned_qty
                 return (
                     OrderIntent(self.symbol, "buy", qty=qty, client_order_id=client_order_id),
-                ) if qty >= self.rule.min_qty else ()
+                ) if qty >= self.rule.min_qty and self._buy_notional_ok else ()
+            case False, _ if self._reduces_fractional_long:
+                qty = self.planned_qty
+                return (
+                    OrderIntent(self.symbol, "sell", qty=qty, client_order_id=client_order_id),
+                ) if qty > 0 else ()
             case False, _:
                 qty = self.planned_qty
                 return (
                     OrderIntent(self.symbol, "sell", qty=qty, client_order_id=client_order_id),
-                ) if qty >= self.rule.min_qty else ()
+                ) if qty >= self.rule.min_qty and self._sell_notional_ok else ()
 
     def _whole_lot_qty(self, qty: float) -> float:
         return math.floor(qty / self.rule.lot_size) * self.rule.lot_size
+
+    def _fractional_qty(self, qty: float) -> float:
+        return math.floor(qty * 1_000_000) / 1_000_000
 
     def _client_order_id(self, batch_key: str) -> str:
         raw = "|".join(

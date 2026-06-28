@@ -8,6 +8,7 @@ from datetime import date
 from domain.portfolio import BrokerSnapshot
 from domain.strategy import StrategyContext, StrategySpec
 from runtime.data_hub import DataView
+from runtime.reasons import ReasonCode
 
 
 @dataclass(frozen=True)
@@ -35,7 +36,7 @@ class ContextBuilder:
         trigger: str,
     ) -> ContextResult:
         if not data.ready:
-            return ContextBlocked(data.block_reason or "data_unavailable")
+            return ContextBlocked(data.block_reason or ReasonCode.DATA_UNAVAILABLE)
         current_weights = {
             symbol: round(position.qty * data.prices[symbol] / spec.capital.amount, 6)
             for symbol, position in broker.positions.items()

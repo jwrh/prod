@@ -36,10 +36,29 @@ class RuntimeApp:
             *(self._supervisor.on_tick(tick) for tick in ticks),
             return_exceptions=True,
         )
-        if any(isinstance(result, ConnectionError) for result in results):
+        failures = tuple(
+            result
+            for result in results
+            if isinstance(result, BaseException) and not isinstance(result, ConnectionError)
+        )
+        for failure in failures:
+            raise failure
+        retry_ticks = tuple(tick for tick, result in zip(ticks, results) if isinstance(result, ConnectionError))
+        if retry_ticks:
             await self._components.reconnect()
+            results = await asyncio.gather(
+                *(self._supervisor.on_tick(tick) for tick in retry_ticks),
+                return_exceptions=True,
+            )
+            failures = tuple(
+                result
+                for result in results
+                if isinstance(result, BaseException) and not isinstance(result, ConnectionError)
+            )
+            for failure in failures:
+                raise failure
         for result in results:
-            if isinstance(result, BaseException) and not isinstance(result, ConnectionError):
+            if isinstance(result, BaseException):
                 raise result
 
     async def run_forever(self) -> None:

@@ -20,6 +20,26 @@ def require_symbol(symbol: str) -> str:
     return symbol.strip().upper()
 
 
+def require_string(value: object, name: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{name} must be a string")
+    return value.strip()
+
+
+def require_integer(value: object, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{name} must be an integer")
+    return value
+
+
+def require_string_sequence(value: object, name: str) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        raise ValueError(f"{name} must be a list")
+    if any(not isinstance(item, str) for item in value):
+        raise ValueError(f"{name} must contain strings")
+    return tuple(value)
+
+
 def require_finite(value: float, name: str, *, positive: bool = False) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ValueError(f"{name} must be finite")

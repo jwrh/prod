@@ -9,6 +9,7 @@ import pytest
 
 def _config_text(log_dir: str = "logs/events", status_path: str = "logs/status.json") -> str:
     return f"""
+mode: replay
 data:
   adapter: replay
   warmup_rows:
@@ -253,6 +254,7 @@ def test_context_builder_returns_explicit_ready_and_blocked_variants():
     from domain.portfolio import AccountSnapshot, BrokerSnapshot, Position
     from runtime.context import ContextBlocked, ContextBuilder, ContextReady
     from runtime.data_hub import DataView
+    from runtime.reasons import ReasonCode
 
     now = datetime(2026, 6, 12, 14, 30, tzinfo=timezone.utc)
     spec = _spec()
@@ -270,9 +272,11 @@ def test_context_builder_returns_explicit_ready_and_blocked_variants():
         ready=True,
     )
     blocked = DataView("demo", now, {}, {}, {}, fresh=False, ready=False, block_reason="missing_prices")
+    unavailable = DataView("demo", now, {}, {}, {}, fresh=False, ready=False)
 
     assert isinstance(ContextBuilder().build(spec, ready, broker, date(2026, 6, 12), "rebalance"), ContextReady)
     assert isinstance(ContextBuilder().build(spec, blocked, broker, date(2026, 6, 12), "rebalance"), ContextBlocked)
+    assert ContextBuilder().build(spec, unavailable, broker, date(2026, 6, 12), "rebalance").reason is ReasonCode.DATA_UNAVAILABLE
 
 
 def test_risk_engine_returns_explicit_decision_variants():
@@ -307,6 +311,7 @@ def test_risk_engine_owns_an_ordered_rule_pipeline():
         ShortSaleRule,
         TargetUniverseRule,
         UnpricedExposureRule,
+        VenueMaxOrderNotionalRule,
     )
 
     engine = RiskEngine()
@@ -319,6 +324,7 @@ def test_risk_engine_owns_an_ordered_rule_pipeline():
         MissingTargetPriceRule(),
         DrawdownRule(),
         GrossNotionalRule(),
+        VenueMaxOrderNotionalRule(),
         MaxOrderNotionalRule(),
         MaxOrderQtyRule(),
     )
@@ -345,9 +351,19 @@ def test_risk_rules_are_independent_policy_objects():
     )
     data = DataView("demo", datetime(2026, 6, 12, 14, 30, tzinfo=timezone.utc), {}, {}, {}, False, False)
     assessment = RiskAssessment(spec, PortfolioTarget.weights({"AAA": -1.0}, "short"), broker, data)
+    priced_data = DataView(
+        "demo",
+        datetime(2026, 6, 12, 14, 30, tzinfo=timezone.utc),
+        {"AAA": 25.0},
+        {},
+        {},
+        True,
+        True,
+    )
+    priced_assessment = RiskAssessment(spec, PortfolioTarget.weights({"AAA": -1.0}, "short"), broker, priced_data)
 
     assert isinstance(UnpricedExposureRule().evaluate(assessment), RiskFlatten)
-    assert ShortSaleRule().evaluate(assessment).reason == "short_not_allowed"
+    assert ShortSaleRule().evaluate(priced_assessment).reason == "short_not_allowed"
 
 
 def test_runtime_objects_use_domain_names_not_generic_manager_suffixes():

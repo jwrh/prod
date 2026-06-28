@@ -1,3 +1,5 @@
+mode: replay
+
 data:
   adapter: replay
   warmup_rows:

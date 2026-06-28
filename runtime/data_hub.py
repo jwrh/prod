@@ -10,6 +10,7 @@ import numpy as np
 from domain.market import BidAsk, DataRequest, INTERVAL_SECONDS, Quote, coerce_warmup_rows
 from domain.ports import MarketDataPort
 from domain.strategy import StrategySpec
+from runtime.reasons import ReasonCode
 
 
 @dataclass(frozen=True)
@@ -40,6 +41,8 @@ class DataHub:
         self._specs: dict[str, StrategySpec] = {}
         self._windows: dict[tuple[str, str], _WindowState] = {}
         self._quotes: dict[str, Quote] = {}
+        self._last_quote_at: dict[str, datetime] = {}
+        self._sequence_blocks: set[str] = set()
         self._disconnected = False
 
     async def connect(self) -> None:
@@ -51,6 +54,7 @@ class DataHub:
 
     async def warmup(self, specs: tuple[StrategySpec, ...]) -> None:
         self._specs = {spec.name: spec for spec in specs}
+        self._reset_quote_state()
         requests = tuple(
             DataRequest(spec.name, window.name, spec.universe, window.interval, window.lookback)
             for spec in specs
@@ -72,11 +76,27 @@ class DataHub:
         symbols = tuple(dict.fromkeys(symbol for spec in specs for symbol in spec.universe))
         await self._feed.subscribe(symbols, self.on_quote)
 
+    def _reset_quote_state(self) -> None:
+        self._quotes.clear()
+        self._last_quote_at.clear()
+        self._sequence_blocks.clear()
+
     def on_quote(self, quote: Quote) -> None:
+        last_seen = self._last_quote_at.get(quote.symbol)
+        if last_seen is not None:
+            if quote.now < last_seen:
+                self._sequence_blocks.add(quote.symbol)
+                return
+            if quote.symbol in self._sequence_blocks and quote.now <= last_seen:
+                return
+        self._last_quote_at[quote.symbol] = quote.now
+        self._sequence_blocks.discard(quote.symbol)
         self._quotes[quote.symbol] = quote
         self._disconnected = False
         for (strategy, _name), state in list(self._windows.items()):
             if quote.symbol not in state.request.symbols:
+                continue
+            if self._request_blocked(state.request):
                 continue
             self._update_window(state, quote)
 
@@ -89,9 +109,11 @@ class DataHub:
         bid_ask: dict[str, BidAsk] = {}
         fresh = not self._disconnected
         for symbol in spec.universe:
+            if symbol in self._sequence_blocks:
+                return self._blocked(spec.name, now, ReasonCode.OUT_OF_SEQUENCE_DATA, fresh=False)
             match self._quotes.get(symbol):
                 case None:
-                    return self._blocked(spec.name, now, "missing_prices", fresh=False)
+                    return self._blocked(spec.name, now, ReasonCode.MISSING_PRICES, fresh=False)
                 case quote:
                     pass
             age = max(0.0, (now - quote.now).total_seconds())
@@ -102,11 +124,14 @@ class DataHub:
                 case int() | float() as bid, int() | float() as ask:
                     bid_ask[symbol] = BidAsk(bid, ask)
         if not fresh:
-            return DataView(spec.name, now, prices, bid_ask, self._copy_windows(spec), False, False, "stale_quotes")
+            return DataView(spec.name, now, prices, bid_ask, self._copy_windows(spec), False, False, ReasonCode.STALE_QUOTES)
         return DataView(spec.name, now, prices, bid_ask, self._copy_windows(spec), True, True)
 
     def _blocked(self, strategy: str, now: datetime, reason: str, *, fresh: bool) -> DataView:
         return DataView(strategy, now, {}, {}, {}, fresh, False, reason)
+
+    def _request_blocked(self, request: DataRequest) -> bool:
+        return any(symbol in self._sequence_blocks for symbol in request.symbols)
 
     def _copy_windows(self, spec: StrategySpec) -> dict[str, np.ndarray]:
         return {

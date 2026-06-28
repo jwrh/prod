@@ -72,6 +72,21 @@ def test_contracts_reject_invalid_market_and_target_values():
         )
 
 
+def test_venue_rule_rejects_malformed_quantity_guardrails():
+    from domain.portfolio import VenueRule
+
+    with pytest.raises(ValueError, match="lot_size must be an integer"):
+        VenueRule(lot_size=True)
+    with pytest.raises(ValueError, match="min_qty must be an integer"):
+        VenueRule(min_qty=True)
+    with pytest.raises(ValueError, match="lot_size must be an integer"):
+        VenueRule(lot_size=1.5)
+    with pytest.raises(ValueError, match="min_qty must be an integer"):
+        VenueRule(min_qty=None)
+    with pytest.raises(ValueError, match="venue rule unsupported keys: 7"):
+        VenueRule().with_overrides({7: True})
+
+
 def test_runtime_import_boundaries_are_clean():
     import ast
     from pathlib import Path

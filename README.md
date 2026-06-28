@@ -38,6 +38,7 @@ waits for terminal broker state.
 
 The public default configuration uses:
 
+- `mode: replay`
 - replay market data
 - paper broker execution
 - one placeholder `DummyStrategy`

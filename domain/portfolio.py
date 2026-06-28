@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import Literal, Mapping
 
@@ -52,14 +52,43 @@ class VenueRule:
     shortable: bool = True
     lot_size: int = 1
     min_qty: int = 1
+    min_notional: float = 1.0
+    max_notional_per_order: float | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.longs_fractional_ok, bool):
             raise ValueError("longs_fractional_ok must be boolean")
         if not isinstance(self.shortable, bool):
             raise ValueError("shortable must be boolean")
+        if isinstance(self.lot_size, bool) or not isinstance(self.lot_size, int):
+            raise ValueError("lot_size must be an integer")
+        if isinstance(self.min_qty, bool) or not isinstance(self.min_qty, int):
+            raise ValueError("min_qty must be an integer")
         if self.lot_size < 1 or self.min_qty < 1:
             raise ValueError("lot_size and min_qty must be >= 1")
+        object.__setattr__(self, "min_notional", require_finite(self.min_notional, "min_notional", positive=True))
+        if self.max_notional_per_order is not None:
+            object.__setattr__(
+                self,
+                "max_notional_per_order",
+                require_finite(self.max_notional_per_order, "max_notional_per_order", positive=True),
+            )
+
+    def with_overrides(self, overrides: Mapping[str, object]) -> "VenueRule":
+        allowed = {
+            "longs_fractional_ok",
+            "shortable",
+            "lot_size",
+            "min_qty",
+            "min_notional",
+            "max_notional_per_order",
+        }
+        extra = sorted(str(key) for key in set(overrides) - allowed)
+        if extra:
+            raise ValueError(f"venue rule unsupported keys: {','.join(extra)}")
+        if "max_notional_per_order" in overrides and overrides["max_notional_per_order"] is None:
+            raise ValueError("venue rule max_notional_per_order cannot be null")
+        return replace(self, **dict(overrides))
 
 
 @dataclass(frozen=True)
